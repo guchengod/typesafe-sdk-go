@@ -510,7 +510,7 @@ func TestNormalizeQuestionsAcceptsEveryContainer(t *testing.T) {
 		{
 			name: "raw map value",
 			questions: func() any {
-				return Questions{"q": map[string]any{"type": "score", "criteria": []any{"bad", "good"}, "weight": 3}}
+				return map[string]any{"q": map[string]any{"type": "score", "criteria": []any{"bad", "good"}, "weight": 3}}
 			},
 			want: map[string]any{"q": rawWant},
 		},
@@ -538,7 +538,9 @@ func TestNormalizeQuestionsLeavesRawQuestionsUntouched(t *testing.T) {
 	score := NewScore([]any{"good"}, WithInstructions("How good?"))
 	instructions := map[string]any{"text": "Spam?", "extra": nil}
 
-	normalized, err := NormalizeQuestions(Questions{
+	// The typed container rejects an untyped dict at compile time, so a caller holding one — here a
+	// dict decoded from elsewhere — passes it through the untyped container instead.
+	normalized, err := NormalizeQuestions(map[string]any{
 		"raw":   raw,
 		"typed": NewNoul(instructions),
 		"score": score,
@@ -648,7 +650,7 @@ func TestNormalizeQuestionsRejectsNonQuestionValues(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			normalized, err := NormalizeQuestions(Questions{"x": test.value})
+			normalized, err := NormalizeQuestions(map[string]any{"x": test.value})
 			questionsAssertError(t, err, want)
 			if normalized != nil {
 				t.Errorf("NormalizeQuestions() = %v, want nil alongside the error", normalized)
@@ -689,7 +691,7 @@ func TestNormalizeQuestionsRawQuestionStructuralChecks(t *testing.T) {
 
 	for _, test := range tests {
 		t.Run(test.name, func(t *testing.T) {
-			normalized, err := NormalizeQuestions(Questions{"x": test.value})
+			normalized, err := NormalizeQuestions(map[string]any{"x": test.value})
 			if test.want != "" {
 				questionsAssertError(t, err, test.want)
 				return
@@ -720,7 +722,7 @@ func TestNormalizeQuestionsScoreCriteriaValidation(t *testing.T) {
 
 	for _, test := range rejected {
 		t.Run("rejects "+test.name, func(t *testing.T) {
-			_, err := NormalizeQuestions(Questions{"q": test.value})
+			_, err := NormalizeQuestions(map[string]any{"q": test.value})
 			questionsAssertError(t, err, want)
 			var scoreErr *ScoreError
 			if !errors.As(err, &scoreErr) {
@@ -766,7 +768,7 @@ func TestNormalizeQuestionsScoreCriteriaValidation(t *testing.T) {
 
 	for _, test := range accepted {
 		t.Run("accepts "+test.name, func(t *testing.T) {
-			normalized, err := NormalizeQuestions(Questions{"q": test.value})
+			normalized, err := NormalizeQuestions(map[string]any{"q": test.value})
 			questionsAssertNoError(t, err)
 			questionsAssertEqual(t, "normalized question", questionsWire(t, normalized["q"]), test.want)
 		})
@@ -790,14 +792,14 @@ func TestNormalizeQuestionsChoiceCriteriaValidation(t *testing.T) {
 	})
 
 	t.Run("raw choice with an explicit nil criteria passes through", func(t *testing.T) {
-		normalized, err := NormalizeQuestions(Questions{"q": map[string]any{"type": "choice", "criteria": nil}})
+		normalized, err := NormalizeQuestions(map[string]any{"q": map[string]any{"type": "choice", "criteria": nil}})
 		questionsAssertNoError(t, err)
 		questionsAssertEqual(t, "normalized question", questionsWire(t, normalized["q"]),
 			map[string]any{"type": "choice", "criteria": nil})
 	})
 
 	t.Run("raw noul with a nil criteria passes through", func(t *testing.T) {
-		normalized, err := NormalizeQuestions(Questions{"q": map[string]any{"type": "noul", "criteria": nil}})
+		normalized, err := NormalizeQuestions(map[string]any{"q": map[string]any{"type": "noul", "criteria": nil}})
 		questionsAssertNoError(t, err)
 		questionsAssertEqual(t, "normalized question", questionsWire(t, normalized["q"]),
 			map[string]any{"type": "noul", "criteria": nil})

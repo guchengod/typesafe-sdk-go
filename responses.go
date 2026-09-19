@@ -289,6 +289,18 @@ func (e *answerDecodeError) Error() string { return e.path + ": " + e.err.Error(
 
 func (e *answerDecodeError) Unwrap() error { return e.err }
 
+// envelope is the shape of a System One success payload: three fields whose names are part of the
+// API contract, so they are modeled as a struct rather than a map of field names to values.
+//
+// Each field holds raw JSON because the SDK validates and decodes them itself, reporting the
+// dotted path of whichever one is malformed. A field left nil was absent; the literal "null"
+// decodes to a non-empty slice, which is how an explicit null is told apart from an absent field.
+type envelope struct {
+	Model   json.RawMessage `json:"model"`
+	Usage   json.RawMessage `json:"usage"`
+	Answers json.RawMessage `json:"answers"`
+}
+
 // decoder turns a response body into a typed response, reporting the dotted path of the first
 // field that is missing or has the wrong shape.
 type decoder struct {
@@ -296,7 +308,7 @@ type decoder struct {
 	header   http.Header
 	endpoint string
 	rawBody  []byte
-	document map[string]json.RawMessage
+	envelope envelope
 }
 
 func newDecoder(resp *response) *decoder {
@@ -335,48 +347,32 @@ func (d *decoder) invalid(path string) error {
 	}, path)
 }
 
-// open decodes the response body into a field-name keyed document. A body that is missing, null,
-// or not a JSON object is reported with an empty field path, because no field is at fault.
-func (d *decoder) open() error {
+// openInto decodes the response body into target. A body that is missing, null, or not a JSON
+// object is reported with an empty field path, because no field is at fault.
+func openInto(d *decoder, target any) error {
 	if isJSONNull(d.rawBody) {
 		return d.invalid("")
 	}
-	if err := json.Unmarshal(d.rawBody, &d.document); err != nil {
+	if err := json.Unmarshal(d.rawBody, target); err != nil {
 		return d.invalid("")
 	}
 	return nil
 }
 
-// raw returns the raw value of a top-level field, reporting whether it was present.
-func (d *decoder) raw(field string) (json.RawMessage, bool) {
-	value, ok := d.document[field]
-	return value, ok
-}
-
-// field decodes a top-level field into target, reporting the field path on failure.
-//
-// A field that is present but null is rejected: every top-level field the SDK decodes is required
-// to hold an object, an array, or a string, and silently decoding null into a zero value would
-// turn a malformed response into a plausible-looking one.
-func (d *decoder) field(name string, target any) error {
-	value, ok := d.raw(name)
-	if !ok || isJSONNull(value) {
-		return d.invalid(name)
+// decodeModel decodes the required model name.
+func (d *decoder) decodeModel(target *string) error {
+	value, ok := decodeText(d.envelope.Model)
+	if !ok {
+		return d.invalid("model")
 	}
-	if err := json.Unmarshal(value, target); err != nil {
-		return d.invalid(name)
-	}
+	*target = value
 	return nil
 }
 
 // decodeUsage decodes the required usage object, reporting the exact path of a malformed count.
 // A count that is absent or null stays nil, which is how the API reports "not measured".
 func (d *decoder) decodeUsage(target *Usage) error {
-	raw, ok := d.raw("usage")
-	if !ok {
-		return d.invalid("usage")
-	}
-	fields, ok := objectEntries(raw)
+	fields, ok := objectEntries(d.envelope.Usage)
 	if !ok {
 		return d.invalid("usage")
 	}
@@ -469,7 +465,7 @@ func decodeText(raw json.RawMessage) (string, bool) {
 // available through [SystemOneResponse.RawBody].
 func parseSystemOneResponse(resp *response, logger *slog.Logger) (*SystemOneResponse, error) {
 	d := newDecoder(resp)
-	if err := d.open(); err != nil {
+	if err := openInto(d, &d.envelope); err != nil {
 		return nil, err
 	}
 
@@ -482,13 +478,15 @@ func parseSystemOneResponse(resp *response, logger *slog.Logger) (*SystemOneResp
 		choices:     map[string]*ChoiceAnswer{},
 		scores:      map[string]*ScoreAnswer{},
 	}
-	if err := d.field("model", &result.Model); err != nil {
+	if err := d.decodeModel(&result.Model); err != nil {
 		return nil, err
 	}
 	if err := d.decodeUsage(&result.Usage); err != nil {
 		return nil, err
 	}
-	if raw, ok := d.raw("answers"); ok {
+	if raw := d.envelope.Answers; raw != nil {
+		// Absent answers default to empty; an explicit null is malformed, because null is not a
+		// JSON object and would otherwise decode to the same empty map.
 		if isJSONNull(raw) {
 			return nil, d.invalid("answers")
 		}
@@ -681,16 +679,25 @@ func answerPath(name string, segments ...string) string {
 	return path
 }
 
+// modelsEnvelope is the shape of a List Models success payload. The field name is part of the
+// API contract, so it is modeled as a struct.
+type modelsEnvelope struct {
+	Models json.RawMessage `json:"models"`
+}
+
 // parseListModelsResponse decodes a List Models success response. Every field is required.
 func parseListModelsResponse(resp *response) (*ListModelsResponse, error) {
 	d := newDecoder(resp)
-	if err := d.open(); err != nil {
+	var wire modelsEnvelope
+	if err := openInto(d, &wire); err != nil {
 		return nil, err
 	}
-
+	if isJSONNull(wire.Models) {
+		return nil, d.invalid("models")
+	}
 	var entries []json.RawMessage
-	if err := d.field("models", &entries); err != nil {
-		return nil, err
+	if err := json.Unmarshal(wire.Models, &entries); err != nil {
+		return nil, d.invalid("models")
 	}
 	models := make([]ModelMetadata, 0, len(entries))
 	for index, entry := range entries {

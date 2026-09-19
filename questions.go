@@ -16,8 +16,14 @@ type Question interface {
 	Validate(name string) error
 }
 
-// Questions maps question names to questions. The names identify the answers in the response.
-type Questions map[string]any
+// Questions maps the names you choose to the questions they identify. The names key the answers in
+// the response.
+//
+// The values are typed as [Question], so a value that is not a question is a compile error. Build
+// them with [NewNoul], [NewChoice], and [NewScore], or with [RawQuestion] for a question shape this
+// version does not model. To pass a plain map[string]any, hand it to the client directly — the
+// question parameter accepts any accepted container, which [NormalizeQuestions] validates.
+type Questions map[string]Question
 
 // NoulCriteria describes what counts as a yes or no answer. Both fields accept a string, a map,
 // or a slice, and may be left nil.
@@ -323,7 +329,7 @@ func questionEntries(questions any) (map[string]any, error) {
 	case nil:
 		return nil, &SDKError{Message: "At least one question is required."}
 	case Questions:
-		return map[string]any(typed), nil
+		return toStringKeyedMap(typed), nil
 	case RawQuestion:
 		// A RawQuestion is a named map[string]any, so accept it as a container the same way
 		// Questions is accepted.

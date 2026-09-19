@@ -227,6 +227,14 @@ Three question kinds are supported. All three accept `instructions` — what the
 decide — as a string, a JSON object, or an array, and all are answered with a probability
 distribution you can threshold yourself.
 
+Questions travel as a map because the names are yours to choose: they are the keys you read the
+answers back with, so they cannot be struct fields. The map's values are typed as
+`typesafe.Question`, which means a value that is not a question fails to compile. For a question
+shape this version does not model, wrap a plain map in `typesafe.RawQuestion` — see
+[Raw questions](#raw-questions). A caller holding an untyped `map[string]any` passes it to the
+client directly; `SystemOne` accepts any of the containers `typesafe.NormalizeQuestions` documents
+and validates them at run time.
+
 ### Noul — yes/no
 
 The probability that a statement holds, in `[0, 1]`. Values near `1` mean yes or true, values near

@@ -9,7 +9,7 @@ package typesafe
 //
 //	go test -run XXX -bench . -benchtime 200000x .
 //
-// on go1.26 darwin/arm64 (Apple M4 Pro). They are a budget, not a contract: treat a higher
+// on go1.27 darwin/arm64 (Apple M4 Pro). They are a budget, not a contract: treat a higher
 // number as a regression to explain, not an automatic failure.
 
 import (
@@ -80,7 +80,7 @@ func benchmarkMockClient(b *testing.B, body string) (*Client, *mockTransport) {
 // BenchmarkSystemOneResponseDecode measures decoding a System One success payload: once for the
 // smallest complete response, once for a payload carrying all three answer kinds.
 //
-// Allocs/op: subset 41 (3.4 KB), full 115 (7.9 KB).
+// Allocs/op: subset 47 (3.5 KB), full 121 (8.1 KB).
 func BenchmarkSystemOneResponseDecode(b *testing.B) {
 	logger := benchmarkLogger()
 	for _, testCase := range []struct {
@@ -108,7 +108,7 @@ func BenchmarkSystemOneResponseDecode(b *testing.B) {
 // BenchmarkQuestionsEncode measures the wire preparation of a mixed question set: validation and
 // normalization followed by JSON encoding, which is what systemOne does before sending.
 //
-// Allocs/op: 32 (1.2 KB).
+// Allocs/op: 34 (1.5 KB).
 func BenchmarkQuestionsEncode(b *testing.B) {
 	questions := fixedQuestions()
 
@@ -219,7 +219,7 @@ func BenchmarkBackoff(b *testing.B) {
 // decoding. The transport answers in process, so the number is the SDK's own overhead with the
 // network removed.
 //
-// Allocs/op: 202 (15 KB).
+// Allocs/op: 210 (15.5 KB).
 func BenchmarkClientSystemOne(b *testing.B) {
 	client, transport := benchmarkMockClient(b, fixedAnswerResponse)
 	questions := fixedQuestions()
