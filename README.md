@@ -17,6 +17,9 @@ instead of free-form text you have to parse.
   `Retry-After` support.
 - **Typed everything.** Typed errors you can match with `errors.As`, typed answers, and
   `SystemOneAs[T]` for your own response models.
+- **A CLI when you want one.** `cmd/typesafe` wraps the same client for shell scripts and
+  pipelines; install it with `go install` or grab a binary from
+  [Releases](https://github.com/guchengod/typesafe-sdk-go/releases).
 
 Requires **Go 1.26 or newer**.
 
@@ -96,6 +99,51 @@ func main() {
 
 ---
 
+## Command line
+
+The repository ships a CLI, built on the standard library only, for use without writing Go:
+
+```bash
+# Install the latest release into $(go env GOPATH)/bin
+go install github.com/guchengod/typesafe-sdk-go/cmd/typesafe@latest
+
+# Or download a binary for your platform
+# https://github.com/guchengod/typesafe-sdk-go/releases
+```
+
+```bash
+export TYPESAFE_API_KEY="ts_live_..."
+
+typesafe models --format text
+
+typesafe ask \
+  --state '{"body": "I was charged twice on invoice #4912."}' \
+  --noul 'billing=Is this about billing?' \
+  --choice 'queue=billing:Charges,technical:API issues,other' \
+  --score 'urgency=routine,elevated,critical' \
+  --format text
+```
+
+```text
+model    jev-1.13.0
+usage    Usage{input_tokens: 367, output_tokens: 69}
+billing  noul 0.9900
+queue    choice billing (confidence 1.00)
+urgency  score 0.53 of 2 (confidence 0.20)
+```
+
+`--format json` (the default) prints the API response, so it composes with `jq`:
+
+```bash
+curl -s https://example.test/ticket.json | typesafe ask --state - --questions questions.json | jq '.answers'
+```
+
+Exit codes tell a script what happened: `0` success, `1` usage error, `2` the API returned an
+error status, `3` the request never reached the API. See the
+[CLI guide](https://github.com/guchengod/typesafe-sdk-go/wiki/CLI) for every flag.
+
+---
+
 ## Documentation
 
 Full guides live in the [**wiki**](https://github.com/guchengod/typesafe-sdk-go/wiki):
@@ -112,6 +160,7 @@ Full guides live in the [**wiki**](https://github.com/guchengod/typesafe-sdk-go/
 | [Logging](https://github.com/guchengod/typesafe-sdk-go/wiki/Logging) | Structured logging and credential redaction |
 | [Security](https://github.com/guchengod/typesafe-sdk-go/wiki/Security) | Redaction, protected headers, redirects, bounded reads, TLS |
 | [Concurrency](https://github.com/guchengod/typesafe-sdk-go/wiki/Concurrency) | Sharing one client across goroutines |
+| [CLI](https://github.com/guchengod/typesafe-sdk-go/wiki/CLI) | The `typesafe` command: flags, output formats, exit codes |
 | [Examples](https://github.com/guchengod/typesafe-sdk-go/wiki/Examples) | Runnable programs in this repository |
 
 Also see:
@@ -148,6 +197,8 @@ go vet ./...
 go test ./...          # unit tests
 go test -run TestIntegration ./...   # live tests, need TYPESAFE_API_KEY
 go test -bench . -run XXX ./...      # benchmarks, no network
+golangci-lint run ./...              # linters
+go build ./cmd/typesafe              # the CLI
 ```
 
 ---
