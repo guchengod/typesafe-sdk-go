@@ -1,7 +1,7 @@
 # TypeSafe AI Go SDK
 
+[![CI](https://github.com/guchengod/typesafe-sdk-go/actions/workflows/ci.yml/badge.svg)](https://github.com/guchengod/typesafe-sdk-go/actions/workflows/ci.yml)
 [![Go Reference](https://pkg.go.dev/badge/github.com/guchengod/typesafe-sdk-go.svg)](https://pkg.go.dev/github.com/guchengod/typesafe-sdk-go)
-[![Go Report Card](https://goreportcard.com/badge/github.com/guchengod/typesafe-sdk-go)](https://goreportcard.com/report/github.com/guchengod/typesafe-sdk-go)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
 Go SDK for [TypeSafe AI](https://typesafe.ai) — deterministic evaluation models that answer
@@ -60,7 +60,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
-	defer client.Close()
+	defer func() { _ = client.Close() }()
 
 	response, err := client.SystemOne(
 		context.Background(),

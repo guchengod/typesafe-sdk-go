@@ -150,14 +150,6 @@ func decodingBody(t *testing.T, call recordedCall) map[string]any {
 	return decoded
 }
 
-// decodeInto unmarshals a recorded request body into target.
-func decodeInto(t *testing.T, call recordedCall, target any) {
-	t.Helper()
-	if err := json.Unmarshal(call.Body, target); err != nil {
-		t.Fatalf("request body is not decodable: %v (body=%q)", err, call.Body)
-	}
-}
-
 // fixedAnswerResponse is a complete System One payload used across tests.
 const fixedAnswerResponse = `{
 	"model": "jev-latest",

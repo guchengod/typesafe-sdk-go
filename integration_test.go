@@ -22,7 +22,7 @@ func liveAPIKey(t *testing.T) string {
 	if err != nil {
 		t.Skipf("skipping integration test: %s is not set", APIKeyEnv)
 	}
-	defer file.Close()
+	defer func() { _ = file.Close() }()
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
 		line := strings.TrimSpace(scanner.Text())

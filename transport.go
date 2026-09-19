@@ -110,14 +110,15 @@ func execute(ctx context.Context, config *Config, httpClient *http.Client, req r
 		started := time.Now()
 		httpResp, err := httpClient.Do(httpReq)
 		if err != nil {
+			// A transport may return a response alongside a redirect or protocol failure.
 			if httpResp != nil && httpResp.Body != nil {
-				httpResp.Body.Close()
+				closeBody(httpResp.Body)
 			}
 			failure := classifyTransportError(err, req.timeout)
 			logFailure(attemptCtx, logger, req.method, targetURL, failure)
 			return failure
 		}
-		defer httpResp.Body.Close()
+		defer closeBody(httpResp.Body)
 
 		payload, err := readBody(httpResp.Body)
 		if err != nil {
@@ -179,6 +180,12 @@ func buildHeaders(config *Config, req request, hasBody bool) http.Header {
 		header.Set(HeaderContentType, ContentTypeJSON)
 	}
 	return header
+}
+
+// closeBody releases a response body, discarding the error: the SDK has already read the payload,
+// and a close failure cannot change the outcome of the call.
+func closeBody(body io.Closer) {
+	_ = body.Close()
 }
 
 // readBody reads a response body, refusing payloads beyond [MaxResponseBodyLimit] rather than

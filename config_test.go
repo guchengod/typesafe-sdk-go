@@ -257,7 +257,7 @@ func TestConfigAccessors(t *testing.T) {
 		if client.Config() == nil {
 			t.Fatal("Config() = nil")
 		}
-		if client.Config() != client.Config() {
+		if first, second := client.Config(), client.Config(); first != second {
 			t.Error("Config() returned different values across calls")
 		}
 		httpClient := client.HTTPClient()
