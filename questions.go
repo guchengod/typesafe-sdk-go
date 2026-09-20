@@ -175,10 +175,16 @@ func NewChoice(criteria map[string]any, opts ...QuestionOption) *ChoiceQuestion 
 // QuestionType returns the wire discriminator.
 func (q *ChoiceQuestion) QuestionType() string { return "choice" }
 
-// Validate reports a question that has no criteria.
+// Validate reports a question that has no criteria or exceeds 255 options.
 func (q *ChoiceQuestion) Validate(name string) error {
 	if q.Criteria == nil {
 		return &SDKError{Message: fmt.Sprintf("Question %q requires \"criteria\".", name)}
+	}
+	if len(q.Criteria) > 255 {
+		if name != "" {
+			return &SDKError{Message: fmt.Sprintf("Choice question %q exceeds maximum of 255 options.", name)}
+		}
+		return &SDKError{Message: "Choice question exceeds maximum of 255 options."}
 	}
 	return nil
 }
@@ -225,9 +231,9 @@ func NewScore(criteria []any, opts ...QuestionOption) *ScoreQuestion {
 // QuestionType returns the wire discriminator.
 func (q *ScoreQuestion) QuestionType() string { return "score" }
 
-// Validate reports a score question whose rubric has no levels.
+// Validate reports a score question whose rubric does not have between 2 and 10 levels.
 func (q *ScoreQuestion) Validate(name string) error {
-	if len(q.Criteria) == 0 {
+	if len(q.Criteria) < 2 || len(q.Criteria) > 10 {
 		return &ScoreError{Name: name}
 	}
 	return nil
@@ -239,14 +245,17 @@ func (q *ScoreQuestion) MarshalJSON() ([]byte, error) {
 	return marshalWithExtra(wire(*q), q.extra)
 }
 
-// ScoreError reports a score question with an empty rubric.
+// ScoreError reports a score question with an invalid rubric.
 type ScoreError struct {
 	// Name is the question name that failed validation.
 	Name string
 }
 
 func (e *ScoreError) Error() string {
-	return fmt.Sprintf("Score question %q has no criteria; at least one score is required.", e.Name)
+	if e.Name != "" {
+		return fmt.Sprintf("Score question %q requires between 2 and 10 levels.", e.Name)
+	}
+	return "Score question requires between 2 and 10 levels."
 }
 
 func (e *ScoreError) isTypeSafeError() {}
@@ -280,23 +289,35 @@ func (q RawQuestion) Validate(name string) error {
 	if !present {
 		return &SDKError{Message: fmt.Sprintf("Question %q requires \"criteria\".", name)}
 	}
-	if questionType == "score" && isEmptyCriteria(criteria) {
+	if questionType == "choice" {
+		if criteriaMap, ok := criteria.(map[string]any); ok && len(criteriaMap) > 255 {
+			if name != "" {
+				return &SDKError{Message: fmt.Sprintf("Choice question %q exceeds maximum of 255 options.", name)}
+			}
+			return &SDKError{Message: "Choice question exceeds maximum of 255 options."}
+		}
+	}
+	if questionType == "score" && isInvalidScoreCriteria(criteria) {
 		return &ScoreError{Name: name}
 	}
 	return nil
 }
 
-// isEmptyCriteria reports whether a raw criteria value carries no score levels.
-func isEmptyCriteria(criteria any) bool {
+// isInvalidScoreCriteria reports whether a raw criteria value does not have between 2 and 10 score levels.
+func isInvalidScoreCriteria(criteria any) bool {
 	switch value := criteria.(type) {
 	case nil:
 		return true
 	case []any:
-		return len(value) == 0
+		return len(value) < 2 || len(value) > 10
 	case []string:
-		return len(value) == 0
+		return len(value) < 2 || len(value) > 10
 	case json.RawMessage:
-		return len(value) == 0 || string(value) == "[]" || string(value) == "null"
+		var items []json.RawMessage
+		if err := json.Unmarshal(value, &items); err == nil {
+			return len(items) < 2 || len(items) > 10
+		}
+		return string(value) == "[]" || string(value) == "null"
 	default:
 		return false
 	}

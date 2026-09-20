@@ -40,7 +40,7 @@ const (
 	SDKName = "typesafe-sdk-go"
 
 	// SDKVersion is the current version of this SDK.
-	SDKVersion = "0.10.0"
+	SDKVersion = "0.10.1"
 
 	// MaxErrorBodyLength limits the raw error body length included in error messages.
 	MaxErrorBodyLength = 200
@@ -53,6 +53,12 @@ const (
 const (
 	SystemOnePath = "/v1/systemone"
 	ModelsPath    = "/v1/models"
+)
+
+// HTTP Status codes.
+const (
+	// StatusOverloaded is the HTTP 529 status code returned when TypeSafe is temporarily overloaded.
+	StatusOverloaded = 529
 )
 
 // Protocol headers.

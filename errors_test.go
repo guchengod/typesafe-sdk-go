@@ -38,6 +38,7 @@ func TestErrorStatusMappingToType(t *testing.T) {
 		{http.StatusNotFound, (*NotFoundError)(nil)},
 		{http.StatusUnprocessableEntity, (*UnprocessableEntityError)(nil)},
 		{http.StatusTooManyRequests, (*RateLimitError)(nil)},
+		{StatusOverloaded, (*OverloadedError)(nil)},
 		{http.StatusInternalServerError, (*InternalServerError)(nil)},
 		{http.StatusServiceUnavailable, (*InternalServerError)(nil)},
 		{599, (*InternalServerError)(nil)},
@@ -863,4 +864,41 @@ func TestAPIErrorNoBodyFallbackRawRendering(t *testing.T) {
 			t.Errorf("Error() = %q, want a Go-formatted rendering of the body", got)
 		}
 	})
+}
+
+func TestOverloadedError(t *testing.T) {
+	t.Parallel()
+	headers := errorsTestHeader(HeaderRetryAfterMs, "350", HeaderRequestID, "req-overloaded-1")
+	raw := []byte(`{"message":"TypeSafe is temporarily overloaded"}`)
+	err := newAPIError(StatusOverloaded, decodeErrorBody(raw), raw, headers, "POST https://api.typesafe.ai/v1/systemone")
+
+	overloaded, ok := AsOverloadedError(err)
+	if !ok {
+		t.Fatalf("AsOverloadedError(%v) = false, want true", err)
+	}
+	if overloaded.Status != StatusOverloaded {
+		t.Errorf("Status = %d, want %d", overloaded.Status, StatusOverloaded)
+	}
+	if overloaded.RequestID != "req-overloaded-1" {
+		t.Errorf("RequestID = %q, want %q", overloaded.RequestID, "req-overloaded-1")
+	}
+	if wait, hasWait := overloaded.RetryAfter(); !hasWait || wait != 350*time.Millisecond {
+		t.Errorf("RetryAfter() = (%v, %v), want (350ms, true)", wait, hasWait)
+	}
+	const wantMsg = "POST https://api.typesafe.ai/v1/systemone: 529 TypeSafe is temporarily overloaded (request_id=req-overloaded-1)"
+	if got := err.Error(); got != wantMsg {
+		t.Errorf("Error() = %q, want %q", got, wantMsg)
+	}
+
+	// Verify AsRateLimitError compatibility with OverloadedError
+	rateLimit, ok := AsRateLimitError(err)
+	if !ok {
+		t.Fatalf("AsRateLimitError(%v) = false, want true for 529", err)
+	}
+	if rateLimit.Status != StatusOverloaded {
+		t.Errorf("rateLimit.Status = %d, want %d", rateLimit.Status, StatusOverloaded)
+	}
+	if wait, hasWait := rateLimit.RetryAfter(); !hasWait || wait != 350*time.Millisecond {
+		t.Errorf("rateLimit.RetryAfter() = (%v, %v), want (350ms, true)", wait, hasWait)
+	}
 }

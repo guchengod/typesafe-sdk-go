@@ -3,6 +3,7 @@ package typesafe
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -279,7 +280,7 @@ func TestQuestionsTypeDiscriminators(t *testing.T) {
 	}{
 		{name: "noul", question: NewNoul("Is this spam?"), wantType: "noul"},
 		{name: "choice", question: NewChoice(map[string]any{"calm": nil}), wantType: "choice"},
-		{name: "score", question: NewScore([]any{"good"}), wantType: "score"},
+		{name: "score", question: NewScore([]any{"low", "high"}), wantType: "score"},
 	}
 
 	for _, test := range tests {
@@ -530,12 +531,12 @@ func TestNormalizeQuestionsAcceptsEveryContainer(t *testing.T) {
 func TestNormalizeQuestionsLeavesRawQuestionsUntouched(t *testing.T) {
 	raw := map[string]any{
 		"type":     "score",
-		"criteria": []string{"good"},
+		"criteria": []string{"bad", "good"},
 		"weight":   3,
 		"nested":   map[string]any{"k": nil},
 	}
 	before := questionsJSON(t, raw)
-	score := NewScore([]any{"good"}, WithInstructions("How good?"))
+	score := NewScore([]any{"low", "high"}, WithInstructions("How good?"))
 	instructions := map[string]any{"text": "Spam?", "extra": nil}
 
 	// The typed container rejects an untyped dict at compile time, so a caller holding one — here a
@@ -550,7 +551,7 @@ func TestNormalizeQuestionsLeavesRawQuestionsUntouched(t *testing.T) {
 	if after := questionsJSON(t, raw); after != before {
 		t.Errorf("raw question was modified: %s, want %s", after, before)
 	}
-	if len(score.Criteria) != 1 || score.Criteria[0] != "good" {
+	if len(score.Criteria) != 2 || score.Criteria[0] != "low" {
 		t.Errorf("score criteria = %v, want the caller's rubric untouched", score.Criteria)
 	}
 	if len(instructions) != 2 || instructions["text"] != "Spam?" {
@@ -558,7 +559,7 @@ func TestNormalizeQuestionsLeavesRawQuestionsUntouched(t *testing.T) {
 	}
 	questionsAssertEqual(t, "normalized raw question", questionsWire(t, normalized["raw"]), map[string]any{
 		"type":     "score",
-		"criteria": []any{"good"},
+		"criteria": []any{"bad", "good"},
 		"weight":   3,
 		"nested":   map[string]any{"k": nil},
 	})
@@ -702,22 +703,29 @@ func TestNormalizeQuestionsRawQuestionStructuralChecks(t *testing.T) {
 	}
 }
 
-// TestNormalizeQuestionsScoreCriteriaValidation pins which rubrics are rejected as empty and
+// TestNormalizeQuestionsScoreCriteriaValidation pins which rubrics are rejected as invalid and
 // which heterogeneous criteria values are accepted.
 func TestNormalizeQuestionsScoreCriteriaValidation(t *testing.T) {
-	const want = `Score question "q" has no criteria; at least one score is required.`
+	const want = `Score question "q" requires between 2 and 10 levels.`
 	rejected := []struct {
 		name  string
 		value any
 	}{
 		{name: "typed nil criteria", value: NewScore(nil)},
 		{name: "typed empty criteria", value: NewScore([]any{})},
+		{name: "typed 1-element criteria", value: NewScore([]any{"one"})},
+		{name: "typed 11-element criteria", value: NewScore([]any{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11})},
 		{name: "raw nil criteria", value: map[string]any{"type": "score", "criteria": nil}},
 		{name: "raw empty array", value: map[string]any{"type": "score", "criteria": []any{}}},
+		{name: "raw 1-element array", value: map[string]any{"type": "score", "criteria": []any{"one"}}},
+		{name: "raw 11-element array", value: map[string]any{"type": "score", "criteria": []any{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}}},
 		{name: "raw empty string array", value: map[string]any{"type": "score", "criteria": []string{}}},
+		{name: "raw 1-element string array", value: map[string]any{"type": "score", "criteria": []string{"one"}}},
 		{name: "raw empty raw message", value: map[string]any{"type": "score", "criteria": json.RawMessage("[]")}},
+		{name: "raw 1-element raw message", value: map[string]any{"type": "score", "criteria": json.RawMessage(`["one"]`)}},
 		{name: "raw null raw message", value: map[string]any{"type": "score", "criteria": json.RawMessage("null")}},
 		{name: "typed raw question with empty criteria", value: RawQuestion{"type": "score", "criteria": []any{}}},
+		{name: "typed raw question with 1-element criteria", value: RawQuestion{"type": "score", "criteria": []any{"one"}}},
 	}
 
 	for _, test := range rejected {
@@ -741,13 +749,18 @@ func TestNormalizeQuestionsScoreCriteriaValidation(t *testing.T) {
 	}{
 		{
 			name:  "typed nonempty criteria",
-			value: NewScore([]any{"good"}),
-			want:  map[string]any{"type": "score", "criteria": []any{"good"}},
+			value: NewScore([]any{"good", "better"}),
+			want:  map[string]any{"type": "score", "criteria": []any{"good", "better"}},
 		},
 		{
-			name:  "typed criteria holding a nil entry",
-			value: NewScore([]any{nil}),
-			want:  map[string]any{"type": "score", "criteria": []any{nil}},
+			name:  "typed criteria holding nil entries",
+			value: NewScore([]any{nil, nil}),
+			want:  map[string]any{"type": "score", "criteria": []any{nil, nil}},
+		},
+		{
+			name:  "typed 10-element criteria",
+			value: NewScore([]any{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}),
+			want:  map[string]any{"type": "score", "criteria": []any{1, 2, 3, 4, 5, 6, 7, 8, 9, 10}},
 		},
 		{
 			name:  "raw string array",
@@ -791,6 +804,24 @@ func TestNormalizeQuestionsChoiceCriteriaValidation(t *testing.T) {
 			map[string]any{"type": "choice", "criteria": map[string]any{}})
 	})
 
+	t.Run("typed choice with > 255 options is rejected", func(t *testing.T) {
+		options := make(map[string]any, 256)
+		for i := range 256 {
+			options[fmt.Sprintf("opt%d", i)] = nil
+		}
+		_, err := NormalizeQuestions(Questions{"q": NewChoice(options)})
+		questionsAssertError(t, err, `Choice question "q" exceeds maximum of 255 options.`)
+	})
+
+	t.Run("raw choice with > 255 options is rejected", func(t *testing.T) {
+		options := make(map[string]any, 256)
+		for i := range 256 {
+			options[fmt.Sprintf("opt%d", i)] = nil
+		}
+		_, err := NormalizeQuestions(map[string]any{"q": map[string]any{"type": "choice", "criteria": options}})
+		questionsAssertError(t, err, `Choice question "q" exceeds maximum of 255 options.`)
+	})
+
 	t.Run("raw choice with an explicit nil criteria passes through", func(t *testing.T) {
 		normalized, err := NormalizeQuestions(map[string]any{"q": map[string]any{"type": "choice", "criteria": nil}})
 		questionsAssertNoError(t, err)
@@ -808,7 +839,7 @@ func TestNormalizeQuestionsChoiceCriteriaValidation(t *testing.T) {
 
 // TestScoreErrorTextAndMarker checks the error the caller receives for an empty rubric.
 func TestScoreErrorTextAndMarker(t *testing.T) {
-	const want = `Score question "rating" has no criteria; at least one score is required.`
+	const want = `Score question "rating" requires between 2 and 10 levels.`
 
 	err := &ScoreError{Name: "rating"}
 	if err.Error() != want {
@@ -1039,7 +1070,7 @@ func TestSystemOneValidatesQuestionsBeforeApplyingExtraBody(t *testing.T) {
 		Questions{"q": NewScore(nil)},
 		WithExtraBody(map[string]any{"questions": map[string]any{"q": map[string]any{"type": "noul"}}}),
 	)
-	questionsAssertError(t, err, `Score question "q" has no criteria; at least one score is required.`)
+	questionsAssertError(t, err, `Score question "q" requires between 2 and 10 levels.`)
 
 	if calls := transport.callsSnapshot(); len(calls) != 0 {
 		t.Errorf("SDK sent %d requests, want none", len(calls))

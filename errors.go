@@ -189,6 +189,26 @@ func (e *RateLimitError) RetryAfter() (time.Duration, bool) {
 	return time.Duration(*e.RetryAfterMS * float64(time.Millisecond)), true
 }
 
+// OverloadedError is an HTTP 529 response indicating that TypeSafe is temporarily overloaded.
+type OverloadedError struct {
+	APIError
+
+	// RetryAfterMS is the wait the server requested in milliseconds, or nil when the
+	// response carried no usable Retry-After or retry-after-ms header.
+	RetryAfterMS *float64
+}
+
+// Unwrap exposes the embedded [APIError] to [errors.As].
+func (e *OverloadedError) Unwrap() error { return &e.APIError }
+
+// RetryAfter returns the server-requested wait and whether the response provided one.
+func (e *OverloadedError) RetryAfter() (time.Duration, bool) {
+	if e.RetryAfterMS == nil {
+		return 0, false
+	}
+	return time.Duration(*e.RetryAfterMS * float64(time.Millisecond)), true
+}
+
 // InternalServerError is an HTTP 5xx response.
 type InternalServerError struct{ APIError }
 
@@ -257,10 +277,28 @@ func AsAPIError(err error) (*APIError, bool) {
 }
 
 // AsRateLimitError extracts the [RateLimitError] when the failure was an HTTP 429.
+// If the failure was an HTTP 529 [OverloadedError], it produces a compatible [RateLimitError]
+// so rate-limiting and overload backoff logic can treat them interchangeably.
 func AsRateLimitError(err error) (*RateLimitError, bool) {
 	var rateLimit *RateLimitError
 	if errors.As(err, &rateLimit) {
 		return rateLimit, true
+	}
+	var overloaded *OverloadedError
+	if errors.As(err, &overloaded) {
+		return &RateLimitError{
+			APIError:     overloaded.APIError,
+			RetryAfterMS: overloaded.RetryAfterMS,
+		}, true
+	}
+	return nil, false
+}
+
+// AsOverloadedError extracts the [OverloadedError] when the failure was an HTTP 529.
+func AsOverloadedError(err error) (*OverloadedError, bool) {
+	var overloaded *OverloadedError
+	if errors.As(err, &overloaded) {
+		return overloaded, true
 	}
 	return nil, false
 }
@@ -475,6 +513,12 @@ func newAPIError(status int, body any, rawBody []byte, headers http.Header, endp
 			rateLimit.RetryAfterMS = new(float64(delay) / float64(time.Millisecond))
 		}
 		return rateLimit
+	case StatusOverloaded:
+		overloaded := &OverloadedError{APIError: base}
+		if delay, ok := parseRetryAfter(headers); ok {
+			overloaded.RetryAfterMS = new(float64(delay) / float64(time.Millisecond))
+		}
+		return overloaded
 	default:
 		if status >= http.StatusInternalServerError {
 			return &InternalServerError{APIError: base}
