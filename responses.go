@@ -372,6 +372,15 @@ func (d *decoder) decodeModel(target *string) error {
 // decodeUsage decodes the required usage object, reporting the exact path of a malformed count.
 // A count that is absent or null stays nil, which is how the API reports "not measured".
 func (d *decoder) decodeUsage(target *Usage) error {
+	var wire struct {
+		InputTokens  *int `json:"input_tokens"`
+		OutputTokens *int `json:"output_tokens"`
+	}
+	if err := json.Unmarshal(d.envelope.Usage, &wire); err == nil && !isJSONNull(d.envelope.Usage) {
+		target.InputTokens = wire.InputTokens
+		target.OutputTokens = wire.OutputTokens
+		return nil
+	}
 	fields, ok := objectEntries(d.envelope.Usage)
 	if !ok {
 		return d.invalid("usage")
@@ -420,6 +429,12 @@ func decodeOptionalInt(raw json.RawMessage) (*int, bool) {
 	if isJSONNull(raw) {
 		return nil, true
 	}
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) > 0 && ((trimmed[0] >= '0' && trimmed[0] <= '9') || trimmed[0] == '-') {
+		if val, err := strconv.Atoi(string(trimmed)); err == nil {
+			return new(val), true
+		}
+	}
 	var value int
 	if err := json.Unmarshal(raw, &value); err == nil {
 		return new(value), true
@@ -436,8 +451,14 @@ func decodeOptionalInt(raw json.RawMessage) (*int, bool) {
 
 // decodeNumber decodes a required JSON number, rejecting null and every non-numeric value.
 func decodeNumber(raw json.RawMessage) (float64, bool) {
-	if isJSONNull(raw) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
 		return 0, false
+	}
+	if (trimmed[0] >= '0' && trimmed[0] <= '9') || trimmed[0] == '-' {
+		if val, err := strconv.ParseFloat(string(trimmed), 64); err == nil && isFinite(val) {
+			return val, true
+		}
 	}
 	var number float64
 	if err := json.Unmarshal(raw, &number); err != nil {
@@ -448,8 +469,12 @@ func decodeNumber(raw json.RawMessage) (float64, bool) {
 
 // decodeText decodes a required JSON string, rejecting null and every non-string value.
 func decodeText(raw json.RawMessage) (string, bool) {
-	if isJSONNull(raw) {
+	trimmed := bytes.TrimSpace(raw)
+	if len(trimmed) < 2 || trimmed[0] != '"' || trimmed[len(trimmed)-1] != '"' {
 		return "", false
+	}
+	if !bytes.ContainsRune(trimmed, '\\') {
+		return string(trimmed[1 : len(trimmed)-1]), true
 	}
 	var text string
 	if err := json.Unmarshal(raw, &text); err != nil {
@@ -610,7 +635,15 @@ func parseAnswer(name string, raw json.RawMessage, d *decoder) (Answer, error) {
 
 // floatMap decodes a field holding a JSON object of numbers keyed by name.
 func floatMap(fields map[string]json.RawMessage, field, name string, d *decoder) (map[string]float64, error) {
-	entries, ok := objectEntries(fields[field])
+	raw, ok := fields[field]
+	if !ok || isJSONNull(raw) {
+		return nil, d.invalid(answerPath(name, field))
+	}
+	var direct map[string]float64
+	if err := json.Unmarshal(raw, &direct); err == nil {
+		return direct, nil
+	}
+	entries, ok := objectEntries(raw)
 	if !ok {
 		return nil, d.invalid(answerPath(name, field))
 	}
@@ -627,7 +660,15 @@ func floatMap(fields map[string]json.RawMessage, field, name string, d *decoder)
 
 // levelMap decodes a field holding a JSON object keyed by integer rubric levels.
 func levelMap(fields map[string]json.RawMessage, field, name string, d *decoder) (map[int]any, error) {
-	entries, ok := objectEntries(fields[field])
+	raw, ok := fields[field]
+	if !ok || isJSONNull(raw) {
+		return nil, d.invalid(answerPath(name, field))
+	}
+	var direct map[int]any
+	if err := json.Unmarshal(raw, &direct); err == nil {
+		return direct, nil
+	}
+	entries, ok := objectEntries(raw)
 	if !ok {
 		return nil, d.invalid(answerPath(name, field))
 	}
@@ -648,7 +689,15 @@ func levelMap(fields map[string]json.RawMessage, field, name string, d *decoder)
 
 // integerMap decodes a field holding a JSON object of numbers keyed by integer rubric levels.
 func integerMap(fields map[string]json.RawMessage, field, name string, d *decoder) (map[int]float64, error) {
-	entries, ok := objectEntries(fields[field])
+	raw, ok := fields[field]
+	if !ok || isJSONNull(raw) {
+		return nil, d.invalid(answerPath(name, field))
+	}
+	var direct map[int]float64
+	if err := json.Unmarshal(raw, &direct); err == nil {
+		return direct, nil
+	}
+	entries, ok := objectEntries(raw)
 	if !ok {
 		return nil, d.invalid(answerPath(name, field))
 	}

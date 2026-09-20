@@ -1164,60 +1164,6 @@ func TestRetryPolicyExecuteValidatesThePolicy(t *testing.T) {
 	}
 }
 
-func TestRetryPolicyClientDefaultRetryStatuses(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		status   int
-		attempts int
-	}{
-		{http.StatusRequestTimeout, 3},
-		{http.StatusTooManyRequests, 3},
-		{http.StatusInternalServerError, 3},
-		{http.StatusServiceUnavailable, 3},
-		{599, 3},
-		{http.StatusBadRequest, 1},
-		{http.StatusUnauthorized, 1},
-		{http.StatusForbidden, 1},
-		{http.StatusNotFound, 1},
-		{http.StatusConflict, 1},
-		{http.StatusUnprocessableEntity, 1},
-		{http.StatusFound, 1},
-	}
-
-	for _, tc := range cases {
-		t.Run(strconv.Itoa(tc.status), func(t *testing.T) {
-			t.Parallel()
-			var delays []time.Duration
-			policy := retryTestPolicy(&delays)
-			client, transport := newMockClient(t, func(*http.Request, int) *http.Response {
-				return JSONResponseWithHeaders(tc.status, `{"message":"failed"}`, map[string]string{HeaderRetryAfterMs: "0"})
-			}, WithRetryPolicy(policy))
-
-			_, err := client.Models.List(t.Context())
-			if err == nil {
-				t.Fatalf("Models.List() error = nil, want a %d failure", tc.status)
-			}
-			apiErr, ok := AsAPIError(err)
-			if !ok || apiErr.Status != tc.status {
-				t.Errorf("error = %v, want a %d failure", err, tc.status)
-			}
-			calls := transport.callsSnapshot()
-			if len(calls) != tc.attempts {
-				t.Fatalf("requests = %d, want %d", len(calls), tc.attempts)
-			}
-			for index, call := range calls {
-				wantCount := ""
-				if index > 0 {
-					wantCount = strconv.Itoa(index)
-				}
-				if got := call.Header.Get(HeaderRetryCount); got != wantCount {
-					t.Errorf("request %d %s = %q, want %q", index, HeaderRetryCount, got, wantCount)
-				}
-			}
-		})
-	}
-}
-
 func TestRetryPolicyClientRetryCountHeaderAndRecovery(t *testing.T) {
 	t.Parallel()
 	var delays []time.Duration

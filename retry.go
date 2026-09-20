@@ -166,10 +166,9 @@ func (p *RetryPolicy) backoff(attempt int) time.Duration {
 	exponent := float64(attempt - 1)
 
 	exponential := maximum
-	if exponent < math.Log2(maximum)-math.Log2(initial) {
-		exponential = math.Ldexp(initial, int(exponent))
-		if exponential > maximum {
-			exponential = maximum
+	if initial < maximum {
+		if exponent < 62 {
+			exponential = min(math.Ldexp(initial, int(exponent)), maximum)
 		}
 	}
 

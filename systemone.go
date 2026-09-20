@@ -123,8 +123,10 @@ func liftAnswers(body []byte, parsed *SystemOneResponse) (map[string]json.RawMes
 			modeled[name] = entry
 		}
 	}
-	if answers, err := json.Marshal(modeled); err == nil {
-		document["answers"] = answers
+	if len(modeled) != len(entries) {
+		if answers, err := json.Marshal(modeled); err == nil {
+			document["answers"] = answers
+		}
 	}
 	for name, entry := range modeled {
 		// Never displace a real envelope field; the SDK's own fields always win.

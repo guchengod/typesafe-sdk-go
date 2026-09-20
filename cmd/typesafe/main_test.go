@@ -4,14 +4,53 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"testing"
+
+	typesafe "github.com/guchengod/typesafe-sdk-go"
 )
+
+var (
+	testRouterMu sync.Mutex
+	testRoutes   = make(map[string]http.Handler)
+	nextAPIID    atomic.Int64
+)
+
+type memoryTransport struct{}
+
+func (m *memoryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	testRouterMu.Lock()
+	handler := testRoutes[req.URL.Host]
+	testRouterMu.Unlock()
+	if handler == nil {
+		return nil, fmt.Errorf("no mock handler for host %s", req.URL.Host)
+	}
+	var bodyBytes []byte
+	if req.Body != nil {
+		bodyBytes, _ = io.ReadAll(req.Body)
+	}
+	reqCopy := req.Clone(req.Context())
+	if bodyBytes != nil {
+		reqCopy.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+	} else {
+		reqCopy.Body = http.NoBody
+	}
+	rec := httptest.NewRecorder()
+	handler.ServeHTTP(rec, reqCopy)
+	return rec.Result(), nil
+}
+
+func init() {
+	clientOptions = []typesafe.Option{typesafe.WithTransport(&memoryTransport{})}
+}
 
 // cliResult is what one CLI invocation produced.
 type cliResult struct {
@@ -20,9 +59,15 @@ type cliResult struct {
 	stderr string
 }
 
+type cliAPIServer struct {
+	URL string
+}
+
+func (s *cliAPIServer) Close() {}
+
 // cliAPI is a stub API the CLI talks to.
 type cliAPI struct {
-	server *httptest.Server
+	server *cliAPIServer
 	// requests records the decoded body of every request the CLI sent.
 	requests []map[string]any
 	// headers records the headers of every request.
@@ -32,18 +77,35 @@ type cliAPI struct {
 
 func newCLIAPI(t *testing.T, respond func(w http.ResponseWriter, r *http.Request)) *cliAPI {
 	t.Helper()
-	api := &cliAPI{respond: respond}
-	api.server = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		body, _ := io.ReadAll(r.Body)
-		if len(body) > 0 {
-			var decoded map[string]any
-			_ = json.Unmarshal(body, &decoded)
-			api.requests = append(api.requests, decoded)
+	id := nextAPIID.Add(1)
+	host := fmt.Sprintf("mock-api-%d.test", id)
+	server := &cliAPIServer{URL: "http://" + host}
+	api := &cliAPI{
+		server:  server,
+		respond: respond,
+	}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Body != nil {
+			body, _ := io.ReadAll(r.Body)
+			if len(body) > 0 {
+				var decoded map[string]any
+				_ = json.Unmarshal(body, &decoded)
+				api.requests = append(api.requests, decoded)
+			}
 		}
 		api.headers = append(api.headers, r.Header.Clone())
 		api.respond(w, r)
-	}))
-	t.Cleanup(api.server.Close)
+	})
+
+	testRouterMu.Lock()
+	testRoutes[host] = handler
+	testRouterMu.Unlock()
+
+	t.Cleanup(func() {
+		testRouterMu.Lock()
+		delete(testRoutes, host)
+		testRouterMu.Unlock()
+	})
 	return api
 }
 

@@ -164,6 +164,30 @@ func TestRedactingHandler(t *testing.T) {
 		}
 	})
 
+	t.Run("secret keys inside http.Header and map[string]any are redacted", func(t *testing.T) {
+		buffer := &bytes.Buffer{}
+		logger := slog.New(NewRedactingHandler(slog.NewJSONHandler(buffer, nil)))
+
+		logger.InfoContext(t.Context(), "record",
+			slog.Any("http_headers", http.Header{
+				"Authorization": []string{"Bearer secret-token"},
+				"X-Custom":      []string{"custom-val"},
+			}),
+			slog.Any("generic_map", map[string]any{
+				"api-key":   "secret-key",
+				"safe_item": 123,
+			}),
+		)
+
+		output := buffer.String()
+		if strings.Contains(output, "secret-token") || strings.Contains(output, "secret-key") {
+			t.Errorf("output leaked secret credentials: %s", output)
+		}
+		if !strings.Contains(output, `"custom-val"`) || !strings.Contains(output, `"safe_item":123`) {
+			t.Errorf("output dropped safe entries: %s", output)
+		}
+	})
+
 	t.Run("clean records pass through unchanged", func(t *testing.T) {
 		var redacting, plain bytes.Buffer
 		redacted := NewRedactingHandler(slog.NewJSONHandler(&redacting, nil))

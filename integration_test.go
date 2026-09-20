@@ -15,6 +15,9 @@ import (
 // TYPESAFE_API_KEY is not already set. Tests that need it call t.Skip when no key is available.
 func liveAPIKey(t *testing.T) string {
 	t.Helper()
+	if os.Getenv("TYPESAFE_RUN_INTEGRATION") != "1" {
+		t.Skip("skipping live integration test: set TYPESAFE_RUN_INTEGRATION=1 to run")
+	}
 	if key := strings.TrimSpace(os.Getenv(APIKeyEnv)); key != "" {
 		return key
 	}

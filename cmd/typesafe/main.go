@@ -195,6 +195,9 @@ func changedFlags(fs *flag.FlagSet) map[string]bool {
 	return changed
 }
 
+// clientOptions allows injecting client options (such as mock transports for tests).
+var clientOptions []typesafe.Option
+
 // options turns the flags into SDK client options.
 func (c *connectionFlags) options(stderr io.Writer) []typesafe.Option {
 	var options []typesafe.Option
@@ -214,6 +217,9 @@ func (c *connectionFlags) options(stderr io.Writer) []typesafe.Option {
 	}
 	if c.verbose {
 		options = append(options, typesafe.WithLogger(slogDebug(stderr)))
+	}
+	if len(clientOptions) > 0 {
+		options = append(options, clientOptions...)
 	}
 	return options
 }

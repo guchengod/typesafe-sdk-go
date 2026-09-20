@@ -207,6 +207,9 @@ func classifyTransportError(err error, timeout time.Duration) error {
 	if errors.As(err, &timeoutErr) {
 		return timeoutErr
 	}
+	if errors.Is(err, context.Canceled) {
+		return err
+	}
 	var urlErr *url.Error
 	if errors.As(err, &urlErr) && urlErr.Timeout() {
 		return &APITimeoutError{

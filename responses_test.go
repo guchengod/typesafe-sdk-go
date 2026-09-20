@@ -924,6 +924,21 @@ func TestSystemOneAsMissingRequiredField(t *testing.T) {
 
 	_, err := SystemOneAs[responseTestRequired](t.Context(), client, "state", fixedQuestions())
 	responseTestAssertValidationError(t, err, "POST https://api.typesafe.ai/v1/systemone", "required", "req-123", body)
+
+	t.Run("embedded anonymous struct missing required field", func(t *testing.T) {
+		type embeddedStruct struct {
+			responseTestRequired
+		}
+		_, err := SystemOneAs[embeddedStruct](t.Context(), client, "state", fixedQuestions())
+		responseTestAssertValidationError(t, err, "POST https://api.typesafe.ai/v1/systemone", "required", "req-123", body)
+	})
+
+	t.Run("null value for non-nullable required field", func(t *testing.T) {
+		const nullBody = `{"model":"test","usage":{"input_tokens":1},"answers":{},"required":null}`
+		nullClient := responseTestJSONClient(t, nullBody, "req-null")
+		_, err := SystemOneAs[responseTestRequired](t.Context(), nullClient, "state", fixedQuestions())
+		responseTestAssertValidationError(t, err, "POST https://api.typesafe.ai/v1/systemone", "required", "req-null", nullBody)
+	})
 }
 
 func TestSystemOneAsCustomFieldTypeMismatch(t *testing.T) {

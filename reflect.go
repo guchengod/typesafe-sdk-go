@@ -24,14 +24,21 @@ func missingRequiredField(document map[string]json.RawMessage, target reflect.Ty
 		return ""
 	}
 	for field := range target.Fields() {
-		if !field.IsExported() || field.Anonymous {
+		if field.Anonymous {
+			if missing := missingRequiredField(document, field.Type); missing != "" {
+				return missing
+			}
+			continue
+		}
+		if !field.IsExported() {
 			continue
 		}
 		name, optional := jsonFieldName(field)
 		if optional || name == "" || canBeAbsent(field.Type) {
 			continue
 		}
-		if _, present := document[name]; !present {
+		raw, present := document[name]
+		if !present || isJSONNull(raw) {
 			return name
 		}
 	}

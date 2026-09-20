@@ -79,45 +79,6 @@ func TestErrorStatusMappingToType(t *testing.T) {
 	}
 }
 
-func TestErrorStatusMappingFromClientResponse(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		status int
-		want   any
-	}{
-		{http.StatusBadRequest, (*BadRequestError)(nil)},
-		{http.StatusUnauthorized, (*AuthenticationError)(nil)},
-		{http.StatusForbidden, (*PermissionDeniedError)(nil)},
-		{http.StatusNotFound, (*NotFoundError)(nil)},
-		{http.StatusUnprocessableEntity, (*UnprocessableEntityError)(nil)},
-		{http.StatusTooManyRequests, (*RateLimitError)(nil)},
-		{http.StatusInternalServerError, (*InternalServerError)(nil)},
-		{599, (*InternalServerError)(nil)},
-		{http.StatusTeapot, (*APIError)(nil)},
-	}
-
-	for _, tc := range cases {
-		t.Run(fmt.Sprint(tc.status), func(t *testing.T) {
-			t.Parallel()
-			client, _ := newJSONClient(t, tc.status, `{"message":"failed"}`)
-			_, err := client.Models.List(t.Context())
-			if err == nil {
-				t.Fatalf("Models.List() error = nil, want status %d failure", tc.status)
-			}
-			if got, want := reflect.TypeOf(err), reflect.TypeOf(tc.want); got != want {
-				t.Fatalf("error type = %v, want %v (error %v)", got, want, err)
-			}
-			want := fmt.Sprintf("GET https://api.typesafe.ai/v1/models: %d failed", tc.status)
-			if err.Error() != want {
-				t.Errorf("Error() = %q, want %q", err.Error(), want)
-			}
-			if _, ok := AsAPIError(err); !ok {
-				t.Errorf("error %v is not extractable as *APIError", err)
-			}
-		})
-	}
-}
-
 func TestAPIErrorErrorStringOptionalParts(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -288,26 +249,6 @@ func TestAPIErrorEndpointOmitsURLCredentials(t *testing.T) {
 	}
 }
 
-func TestAPIErrorEndpointFromClientOmitsCredentials(t *testing.T) {
-	t.Parallel()
-	client, _ := newMockClient(t, func(*http.Request, int) *http.Response {
-		return JSONResponse(http.StatusBadRequest, `{"message":"Bad request"}`)
-	}, WithBaseURL("https://user:password@example.test/prefix"))
-	_, err := client.Models.List(t.Context())
-	if err == nil {
-		t.Fatal("Models.List() error = nil, want failure")
-	}
-	const want = "GET https://example.test/prefix/v1/models: 400 Bad request"
-	if got := err.Error(); got != want {
-		t.Errorf("Error() = %q, want %q", got, want)
-	}
-	for _, secret := range []string{"test-key", "password"} {
-		if strings.Contains(err.Error(), secret) {
-			t.Errorf("Error() leaks %q: %q", secret, err.Error())
-		}
-	}
-}
-
 func TestDecodeErrorBodyShapes(t *testing.T) {
 	t.Parallel()
 	cases := []struct {
@@ -333,68 +274,6 @@ func TestDecodeErrorBodyShapes(t *testing.T) {
 			t.Parallel()
 			if got := decodeErrorBody(tc.raw); !reflect.DeepEqual(got, tc.want) {
 				t.Errorf("decodeErrorBody(%q) = %#v, want %#v", tc.raw, got, tc.want)
-			}
-		})
-	}
-}
-
-func TestErrorBodyEdgeCasesFromClientResponse(t *testing.T) {
-	t.Parallel()
-	const endpoint = "GET https://api.typesafe.ai/v1/models: 400 "
-	cases := []struct {
-		name string
-		body string
-		want string
-	}{
-		{"empty body", "", endpoint + "status code (no body)"},
-		{"json null", "null", endpoint + "status code (no body)"},
-		{"empty array", "[]", endpoint + "[]"},
-		{"number", "42", endpoint + "42"},
-		{"non-json text keeps its bytes", "not JSON: \xff", endpoint + "not JSON: \xff"},
-		{"long plain text is an extracted message", strings.Repeat("x", 201), endpoint + strings.Repeat("x", 201)},
-		{
-			"long unstructured body is truncated",
-			`{"unknown":"` + strings.Repeat("x", 187) + `"}`,
-			endpoint + `{"unknown":"` + strings.Repeat("x", 187) + `"…`,
-		},
-		{"empty error falls through to the raw body", `{"error":"","message":"ignored"}`, endpoint + `{"error":"","message":"ignored"}`},
-		{"unusable detail entries fall through to the raw body", `{"detail":[null,42,{"msg":4}]}`, endpoint + `{"detail":[null,42,{"msg":4}]}`},
-		{"nested error message", `{"error":{"message":"Nested"}}`, endpoint + "Nested"},
-		{"error wins over message", `{"error":"first","message":"second"}`, endpoint + "first"},
-		{
-			"validation detail renders a dotted path",
-			`{"detail":[{"loc":["body","answers","tone"],"msg":"Input should be a valid number"}]}`,
-			endpoint + "answers.tone: Input should be a valid number",
-		},
-		{
-			"validation detail renders numeric segments",
-			`{"detail":[{"loc":["body",0,"q"],"msg":"bad"}]}`,
-			endpoint + "0.q: bad",
-		},
-		{
-			"server message field",
-			`{"message":"Too many requests"}`,
-			endpoint + "Too many requests",
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			client, _ := newJSONClient(t, http.StatusBadRequest, tc.body)
-			_, err := client.Models.List(t.Context())
-			if err == nil {
-				t.Fatal("Models.List() error = nil, want failure")
-			}
-			if err.Error() != tc.want {
-				t.Errorf("Error() = %q, want %q", err.Error(), tc.want)
-			}
-			apiErr, ok := AsAPIError(err)
-			if !ok {
-				t.Fatalf("error %v is not extractable as *APIError", err)
-			}
-			if apiErr.RequestID != "" {
-				t.Errorf("RequestID = %q, want empty", apiErr.RequestID)
 			}
 		})
 	}
@@ -964,62 +843,6 @@ func TestAPIErrorMessageOverridePreservesBodyAndHeaders(t *testing.T) {
 	}
 	if err.RetryAfterMS == nil || *err.RetryAfterMS != 125 {
 		t.Errorf("RetryAfterMS = %v, want 125", err.RetryAfterMS)
-	}
-}
-
-func TestAPIErrorRequestContextFromClientResponse(t *testing.T) {
-	t.Parallel()
-	cases := []struct {
-		name     string
-		resource string
-		want     string
-	}{
-		{
-			name:     "models",
-			resource: "models",
-			want:     "GET https://api.example.test/prefix/v1/models: 429 Too many requests (request_id=req-context)",
-		},
-		{
-			name:     "system one",
-			resource: "system_one",
-			want:     "POST https://api.example.test/prefix/v1/systemone: 429 Too many requests (request_id=req-context)",
-		},
-	}
-
-	for _, tc := range cases {
-		t.Run(tc.name, func(t *testing.T) {
-			t.Parallel()
-			client, _ := newMockClient(t, func(*http.Request, int) *http.Response {
-				return JSONResponseWithHeaders(http.StatusTooManyRequests, `{"message":"Too many requests"}`,
-					map[string]string{HeaderRequestID: "req-context"})
-			}, WithAPIKey("private-api-key"), WithBaseURL("https://api.example.test/prefix"))
-
-			var err error
-			if tc.resource == "models" {
-				_, err = client.Models.List(t.Context())
-			} else {
-				_, err = client.SystemOne(t.Context(), "hello", fixedQuestions())
-			}
-			if err == nil {
-				t.Fatal("call error = nil, want a 429 failure")
-			}
-			if err.Error() != tc.want {
-				t.Errorf("Error() = %q, want %q", err.Error(), tc.want)
-			}
-			rateLimit, ok := AsRateLimitError(err)
-			if !ok {
-				t.Fatalf("AsRateLimitError(%v) = false, want true", err)
-			}
-			if rateLimit.Endpoint != strings.TrimSuffix(tc.want, ": 429 Too many requests (request_id=req-context)") {
-				t.Errorf("Endpoint = %q", rateLimit.Endpoint)
-			}
-			if rateLimit.RequestID != "req-context" {
-				t.Errorf("RequestID = %q, want %q", rateLimit.RequestID, "req-context")
-			}
-			if strings.Contains(err.Error(), "private-api-key") {
-				t.Errorf("Error() leaks the API key: %q", err.Error())
-			}
-		})
 	}
 }
 

@@ -3,6 +3,7 @@ package typesafe
 import (
 	"context"
 	"log/slog"
+	"net/http"
 	"os"
 	"strings"
 )
@@ -132,24 +133,70 @@ func redactAttr(attr slog.Attr) (slog.Attr, bool) {
 	if isSecretHeader(attr.Key) {
 		return slog.String(attr.Key, "***"), true
 	}
-	values, ok := attr.Value.Any().(map[string]string)
-	if !ok {
-		return attr, false
-	}
-	changed := false
-	redacted := make(map[string]string, len(values))
-	for name, value := range values {
-		if isSecretHeader(name) {
-			redacted[name] = "***"
-			changed = true
-			continue
+	switch values := attr.Value.Any().(type) {
+	case map[string]string:
+		changed := false
+		redacted := make(map[string]string, len(values))
+		for name, value := range values {
+			if isSecretHeader(name) {
+				redacted[name] = "***"
+				changed = true
+				continue
+			}
+			redacted[name] = value
 		}
-		redacted[name] = value
-	}
-	if !changed {
+		if !changed {
+			return attr, false
+		}
+		return slog.Any(attr.Key, redacted), true
+	case http.Header:
+		changed := false
+		redacted := make(http.Header, len(values))
+		for name, vals := range values {
+			if isSecretHeader(name) {
+				redacted[name] = []string{"***"}
+				changed = true
+				continue
+			}
+			redacted[name] = vals
+		}
+		if !changed {
+			return attr, false
+		}
+		return slog.Any(attr.Key, redacted), true
+	case map[string][]string:
+		changed := false
+		redacted := make(map[string][]string, len(values))
+		for name, vals := range values {
+			if isSecretHeader(name) {
+				redacted[name] = []string{"***"}
+				changed = true
+				continue
+			}
+			redacted[name] = vals
+		}
+		if !changed {
+			return attr, false
+		}
+		return slog.Any(attr.Key, redacted), true
+	case map[string]any:
+		changed := false
+		redacted := make(map[string]any, len(values))
+		for name, val := range values {
+			if isSecretHeader(name) {
+				redacted[name] = "***"
+				changed = true
+				continue
+			}
+			redacted[name] = val
+		}
+		if !changed {
+			return attr, false
+		}
+		return slog.Any(attr.Key, redacted), true
+	default:
 		return attr, false
 	}
-	return slog.Any(attr.Key, redacted), true
 }
 
 // WithAttrs returns a handler whose records carry the given attributes.
