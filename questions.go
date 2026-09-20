@@ -3,6 +3,7 @@ package typesafe
 import (
 	"encoding/json"
 	"fmt"
+	"reflect"
 	"strings"
 )
 
@@ -290,7 +291,15 @@ func (q RawQuestion) Validate(name string) error {
 		return &SDKError{Message: fmt.Sprintf("Question %q requires \"criteria\".", name)}
 	}
 	if questionType == "choice" {
-		if criteriaMap, ok := criteria.(map[string]any); ok && len(criteriaMap) > 255 {
+		if rawMsg, ok := criteria.(json.RawMessage); ok {
+			var rawMap map[string]json.RawMessage
+			if err := json.Unmarshal(rawMsg, &rawMap); err == nil && len(rawMap) > 255 {
+				if name != "" {
+					return &SDKError{Message: fmt.Sprintf("Choice question %q exceeds maximum of 255 options.", name)}
+				}
+				return &SDKError{Message: "Choice question exceeds maximum of 255 options."}
+			}
+		} else if v := reflect.ValueOf(criteria); v.IsValid() && v.Kind() == reflect.Map && v.Len() > 255 {
 			if name != "" {
 				return &SDKError{Message: fmt.Sprintf("Choice question %q exceeds maximum of 255 options.", name)}
 			}
@@ -319,6 +328,10 @@ func isInvalidScoreCriteria(criteria any) bool {
 		}
 		return string(value) == "[]" || string(value) == "null"
 	default:
+		v := reflect.ValueOf(criteria)
+		if v.IsValid() && v.Kind() == reflect.Slice {
+			return v.Len() < 2 || v.Len() > 10
+		}
 		return false
 	}
 }

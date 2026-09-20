@@ -724,6 +724,8 @@ func TestNormalizeQuestionsScoreCriteriaValidation(t *testing.T) {
 		{name: "raw empty raw message", value: map[string]any{"type": "score", "criteria": json.RawMessage("[]")}},
 		{name: "raw 1-element raw message", value: map[string]any{"type": "score", "criteria": json.RawMessage(`["one"]`)}},
 		{name: "raw null raw message", value: map[string]any{"type": "score", "criteria": json.RawMessage("null")}},
+		{name: "raw 1-element map slice", value: map[string]any{"type": "score", "criteria": []map[string]any{{"desc": "one"}}}},
+		{name: "raw 11-element int slice", value: map[string]any{"type": "score", "criteria": []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}}},
 		{name: "typed raw question with empty criteria", value: RawQuestion{"type": "score", "criteria": []any{}}},
 		{name: "typed raw question with 1-element criteria", value: RawQuestion{"type": "score", "criteria": []any{"one"}}},
 	}
@@ -819,6 +821,13 @@ func TestNormalizeQuestionsChoiceCriteriaValidation(t *testing.T) {
 			options[fmt.Sprintf("opt%d", i)] = nil
 		}
 		_, err := NormalizeQuestions(map[string]any{"q": map[string]any{"type": "choice", "criteria": options}})
+		questionsAssertError(t, err, `Choice question "q" exceeds maximum of 255 options.`)
+
+		stringOptions := make(map[string]string, 256)
+		for i := range 256 {
+			stringOptions[fmt.Sprintf("opt%d", i)] = "desc"
+		}
+		_, err = NormalizeQuestions(map[string]any{"q": map[string]any{"type": "choice", "criteria": stringOptions}})
 		questionsAssertError(t, err, `Choice question "q" exceeds maximum of 255 options.`)
 	})
 
