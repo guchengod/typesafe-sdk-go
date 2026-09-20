@@ -99,6 +99,71 @@ func main() {
 
 ---
 
+## Patterns & Model Guidance
+
+TypeSafe's **Jev** is a calibrated System One model designed for fast, discrete qualitative decisions rather than continuous generation or arithmetic calculation. Keep determinism and arithmetic in Go code, and use Jev for structured judgments.
+
+### 1. Confidence-Gated Routing (置信度三段式路由)
+
+Every `Choice` and `Score` answer includes a `Confidence` score between `0.0` and `1.0`, derived from how probability mass concentrates across alternatives. Use confidence as an operational control axis:
+
+```go
+category := response.Choices()["category"]
+
+switch {
+case category.Confidence >= 0.85:
+	// High confidence: act automatically without human intervention
+	dispatchTicket(category.Choice)
+
+case category.Confidence >= 0.50:
+	// Medium confidence: proceed with caution, flag for confirmation
+	flagForOperatorReview(category.Choice)
+
+default:
+	// Low confidence: model is genuinely unsure ("I don't know"); route to human triage
+	routeToHumanTriage()
+}
+```
+
+### 2. Counting & Speculative Fan-Out (计数与投机性扇出)
+
+Jev is not an arithmetic calculator and does not count items reliably. When counting items that match a condition across a slice or list, **keep the arithmetic in Go**: fan out atomic `Noul` questions in a single `SystemOne` request, then sum the matching probabilities in code:
+
+```go
+items := []string{"urgent payment bug", "typo in docs", "security vulnerability"}
+
+questions := make(typesafe.Questions, len(items))
+for i, item := range items {
+	questions[fmt.Sprintf("item_%d", i)] = typesafe.NewNoul(
+		fmt.Sprintf("Does this issue describe a severe production or security incident: %q?", item),
+	)
+}
+
+// Jev ingests the state once and evaluates all questions in parallel
+resp, err := client.SystemOne(ctx, map[string]any{"items": items}, questions)
+if err != nil {
+	log.Fatal(err)
+}
+
+// Aggregate in Go code
+severeCount := 0
+for i := range items {
+	if resp.Nouls()[fmt.Sprintf("item_%d", i)].Noul >= 0.5 {
+		severeCount++
+	}
+}
+fmt.Printf("Severe issues: %d of %d\n", severeCount, len(items))
+```
+
+### 3. Score Rubric: Threshold Filtering vs Arithmetic (评分题准则)
+
+`ScoreAnswer.Score` is the probability-weighted average across discrete levels (`0` to `len(levels)-1`):
+- **Do:** Use `score` for threshold gating (e.g. `urgency.Score >= 1.5`).
+- **Don't:** Do not use `score` as a continuous linear interpolator to reconstruct exact numerical quantities between levels.
+- **Bounds:** Score rubrics require between **2 and 10 levels**. Choice questions accept up to **255 options**.
+
+---
+
 ## Command line
 
 The repository ships a CLI, built on the standard library only, for use without writing Go:

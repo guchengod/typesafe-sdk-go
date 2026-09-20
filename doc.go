@@ -63,19 +63,50 @@
 //
 //	result, err := typesafe.SystemOneAs[Ticket](ctx, client, state, questions)
 //
+// Alternatively, [SystemOneInto] populates an existing struct pointer in-place.
 // A top-level field that cannot represent absence — anything but a pointer, map, slice,
 // interface, function, or channel — is required, unless it is tagged omitempty or omitzero. A
 // missing required field is reported as an [APIResponseValidationError] naming the field.
+//
+// # Patterns and Model Best Practices
+//
+// TypeSafe's Jev model is a calibrated System One engine. It excels at qualitative classification,
+// judgment, and routing, but does not perform open-ended text generation or reliable numeric arithmetic.
+//
+// 1. Confidence-Gated Routing:
+// Choice and Score answers include a statistical Confidence (0 to 1). A proven pattern is to tier actions:
+//
+//	switch {
+//	case answer.Confidence >= 0.85:
+//		// High confidence: act automatically without human involvement
+//	case answer.Confidence >= 0.50:
+//		// Medium confidence: proceed with caution or ask for confirmation
+//	default:
+//		// Low confidence: model is unsure ("I don't know"); route to human triage
+//	}
+//
+// 2. Counting & Speculative Fan-Out:
+// Do not ask Jev to count items or compute sums. Keep arithmetic in Go: fan out atomic Noul questions
+// across candidates in a single [Client.SystemOne] request, then aggregate the matching counts in Go.
+//
+// 3. Score Rubrics:
+// Score questions require between 2 and 10 discrete rubric levels. The resulting [ScoreAnswer.Score]
+// is an expected value suited for threshold filtering (e.g. score >= 1.5). Do not use Score as a
+// continuous interpolator to reconstruct exact numeric quantities.
+//
+// 4. Choice Questions:
+// Choice questions support up to 255 options per question.
 //
 // # Errors
 //
 // Failures are typed and match with errors.As. Unsuccessful HTTP statuses map onto [APIError]
 // and its status-specific subclasses ([BadRequestError], [AuthenticationError],
 // [PermissionDeniedError], [NotFoundError], [UnprocessableEntityError], [RateLimitError],
-// [InternalServerError]); each unwraps to [APIError], so a single check finds both forms.
+// [OverloadedError], [InternalServerError]); each unwraps to [APIError], so a single check finds both forms.
+// [OverloadedError] (HTTP 529) and [RateLimitError] (HTTP 429) provide RetryAfter() for backoff delays.
 // Transport failures are [APIConnectionError] or [APITimeoutError], a malformed success body is
 // [APIResponseValidationError], and invalid configuration or input is [SDKError]. [AsAPIError],
-// [AsRateLimitError], [AsTimeoutError], and [AsValidationError] are convenience extractors.
+// [AsRateLimitError], [AsOverloadedError], [AsTimeoutError], and [AsValidationError] are convenience extractors.
 //
 // # Configuration
 //

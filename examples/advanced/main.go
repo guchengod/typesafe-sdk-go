@@ -163,6 +163,57 @@ Set it to your TypeSafe API key and run the example again:
 		fmt.Printf("  summary:    %s\n", ticket.Summary)
 	}
 
+	// Pattern 1: Confidence-gated routing (Best Practice)
+	// The answer's Confidence (0..1) reflects how probability is concentrated.
+	// Dividing confidence into tiers allows robust automated workflows:
+	fmt.Println("\nconfidence-gated routing:")
+	switch {
+	case ticket.Tone.Confidence >= 0.85:
+		// High confidence: act automatically without human intervention.
+		fmt.Printf("  [high confidence: %.2f] Automated dispatch to %s response queue\n", ticket.Tone.Confidence, ticket.Tone.Choice)
+	case ticket.Tone.Confidence >= 0.50:
+		// Medium confidence: proceed with caution or ask operator confirmation.
+		fmt.Printf("  [medium confidence: %.2f] Flagging %s for operator review\n", ticket.Tone.Confidence, ticket.Tone.Choice)
+	default:
+		// Low confidence: model is genuinely unsure ("I don't know"); route to human triage.
+		fmt.Printf("  [low confidence: %.2f] Uncertainty detected; routing to human triage\n", ticket.Tone.Confidence)
+	}
+
+	// Pattern 2: Counting & Speculative Fan-Out (Jev Jaggedness failure mode #2)
+	// Jev is a qualitative decision model, not a calculator, and does not tally reliably.
+	// To count matching items across a slice, keep arithmetic in Go: fan out atomic
+	// questions per candidate in one call, then aggregate the answers in code.
+	fmt.Println("\ncounting pattern (speculative fan-out):")
+	issues := []string{
+		"Database primary node kernel panic",
+		"How do I update my billing address?",
+		"CSS alignment slightly off in dark mode",
+		"Active zero-day exploit detected on auth API",
+	}
+	fanOutQuestions := make(typesafe.Questions, len(issues))
+	for i, issue := range issues {
+		fanOutQuestions[fmt.Sprintf("issue_%d", i)] = typesafe.NewNoul(
+			fmt.Sprintf("Does this issue represent a critical security incident or production outage: %q?", issue),
+		)
+	}
+	fanOutResp, err := client.SystemOne(ctx, map[string]any{"issues": issues}, fanOutQuestions)
+	if err != nil {
+		reportError(err)
+	} else {
+		criticalCount := 0
+		for i, issue := range issues {
+			key := fmt.Sprintf("issue_%d", i)
+			answer := fanOutResp.Nouls()[key]
+			if answer != nil && answer.Noul >= 0.5 {
+				criticalCount++
+				fmt.Printf("  [%d] CRITICAL (p=%.2f): %s\n", i+1, answer.Noul, issue)
+			} else if answer != nil {
+				fmt.Printf("  [%d] NORMAL   (p=%.2f): %s\n", i+1, answer.Noul, issue)
+			}
+		}
+		fmt.Printf("  -> Aggregated count in Go code: %d of %d issues are critical\n", criticalCount, len(issues))
+	}
+
 	return nil
 }
 
@@ -170,11 +221,18 @@ Set it to your TypeSafe API key and run the example again:
 // unwraps to the errors its more general siblings cover, so the checks run most specific first.
 func reportError(err error) {
 	var rateLimit *typesafe.RateLimitError
+	var overloaded *typesafe.OverloadedError
 	var validation *typesafe.APIResponseValidationError
 	var apiErr *typesafe.APIError
 	var timeout *typesafe.APITimeoutError
 
 	switch {
+	case errors.As(err, &overloaded):
+		if wait, ok := overloaded.RetryAfter(); ok {
+			fmt.Printf("  temporarily overloaded (529): retry after %v (request_id=%s)\n", wait, overloaded.RequestID)
+		} else {
+			fmt.Printf("  temporarily overloaded (529): retry after a short delay (request_id=%s)\n", overloaded.RequestID)
+		}
 	case errors.As(err, &rateLimit):
 		if wait, ok := rateLimit.RetryAfter(); ok {
 			fmt.Printf("  rate limited: retry after %v (request_id=%s)\n", wait, rateLimit.RequestID)

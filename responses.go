@@ -62,7 +62,11 @@ type ChoiceAnswer struct {
 	// Choice is the criteria key with the highest probability.
 	Choice string `json:"choice"`
 
-	// Confidence is the confidence in the selection, from 0 to 1.
+	// Confidence is the statistical certainty of the choice, from 0 to 1, derived from how the
+	// probability is concentrated across alternatives. Higher values indicate a clear winner; lower
+	// values indicate uncertainty or split probabilities. This is the primary signal for confidence-gated
+	// routing (e.g. act automatically when >= 0.85, seek confirmation when >= 0.50, and route to human
+	// review when < 0.50).
 	Confidence float64 `json:"confidence"`
 
 	// Probabilities is the probability of each criteria key, from 0 to 1.
@@ -74,12 +78,19 @@ func (a *ChoiceAnswer) AnswerType() string { return "choice" }
 
 // ScoreAnswer is a rating against an ordered rubric.
 //
-// See the score primitive (https://docs.typesafe.ai/primitives/score) for details.
+// Model Behavior Note (Jev 1.13): Score is the probability-weighted average of discrete rubric levels.
+// It is calibrated for threshold gating and ordinal classification (e.g. score >= 1.5). Do NOT use Score
+// as a continuous linear interpolator or calculator to reconstruct exact numerical magnitudes between levels,
+// because System One models are qualitative decision engines, not numeric calculators.
+//
+// See the score primitive (https://docs.typesafe.ai/primitives/score) and model jaggedness
+// (https://docs.typesafe.ai/model-jaggedness/jev-1.13) for details.
 type ScoreAnswer struct {
 	// Type is always "score".
 	Type string `json:"type"`
 
-	// Score is the probability-weighted average of the rubric levels; it may fall between levels.
+	// Score is the probability-weighted average across discrete rubric levels (0 to len(Legend)-1);
+	// it may fall between levels. Suitable for threshold comparison, not for continuous magnitude reconstruction.
 	Score float64 `json:"score"`
 
 	// Confidence is the confidence in the rating, from 0 to 1.

@@ -30,7 +30,13 @@ import (
 //	}
 //	fmt.Println(response.Nouls()["billing"].Noul)
 //
+// State can be a string, a JSON-serializable struct, a slice, or a map[string]any.
+// Keep state focused on the relevant context to avoid distractor noise. Questions accepts
+// [Questions], map[string]Question, or map[string]any.
+//
 // Errors are typed: [SDKError] for invalid input, [APIError] and its status-specific subclasses
+// ([BadRequestError], [AuthenticationError], [PermissionDeniedError], [NotFoundError],
+// [UnprocessableEntityError], [RateLimitError], [OverloadedError], [InternalServerError])
 // for unsuccessful responses, [APIConnectionError] and [APITimeoutError] for transport failures,
 // and [APIResponseValidationError] for a success response that could not be decoded.
 func (c *Client) SystemOne(ctx context.Context, state any, questions any, opts ...RequestOption) (*SystemOneResponse, error) {

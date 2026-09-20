@@ -142,13 +142,16 @@ func (q *NoulQuestion) MarshalJSON() ([]byte, error) {
 
 // ChoiceQuestion selects between named alternatives.
 //
+// A Choice question picks one option from a defined set of up to 255 alternatives.
+// The response includes the selected option, the full probability distribution, and a confidence score.
+//
 // See the choice primitive (https://docs.typesafe.ai/primitives/choice) for details.
 type ChoiceQuestion struct {
 	// Type is always "choice".
 	Type string `json:"type"`
 
 	// Criteria maps each label to its description: a string, a JSON object, an array, or nil for
-	// an undescribed label.
+	// an undescribed label. Supports up to 255 options.
 	Criteria map[string]any `json:"criteria"`
 
 	// Instructions is the question to ask, expressed as a string, a JSON object, or an array.
@@ -157,7 +160,7 @@ type ChoiceQuestion struct {
 	extra map[string]any
 }
 
-// NewChoice creates a choice question.
+// NewChoice creates a choice question with up to 255 alternative options.
 //
 //	typesafe.NewChoice(
 //		map[string]any{"calm": nil, "angry": "An upset or hostile message"},
@@ -198,13 +201,17 @@ func (q *ChoiceQuestion) MarshalJSON() ([]byte, error) {
 
 // ScoreQuestion rates content using an ordered rubric.
 //
+// A Score rubric requires between 2 and 10 levels. The response includes an expected score
+// (probability-weighted average), a probability for each level, and a confidence score.
+// Use Score for threshold gating rather than continuous numeric calculations.
+//
 // See the score primitive (https://docs.typesafe.ai/primitives/score) for details.
 type ScoreQuestion struct {
 	// Type is always "score".
 	Type string `json:"type"`
 
 	// Criteria is the ordered rubric: each entry's position is its score, starting at zero. Each
-	// entry is a string, a JSON object, or an array.
+	// entry is a string, a JSON object, or an array. Must contain between 2 and 10 levels.
 	Criteria []any `json:"criteria"`
 
 	// Instructions is the question to ask, expressed as a string, a JSON object, or an array.
@@ -213,7 +220,7 @@ type ScoreQuestion struct {
 	extra map[string]any
 }
 
-// NewScore creates a score question with an ordered rubric.
+// NewScore creates a score question with an ordered rubric containing between 2 and 10 levels.
 //
 //	typesafe.NewScore(
 //		[]any{"can wait", "needs attention this week", "needs attention today"},
