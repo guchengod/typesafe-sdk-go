@@ -40,7 +40,7 @@ const (
 	SDKName = "typesafe-sdk-go"
 
 	// SDKVersion is the current version of this SDK.
-	SDKVersion = "0.10.1"
+	SDKVersion = "0.11.0"
 
 	// MaxErrorBodyLength limits the raw error body length included in error messages.
 	MaxErrorBodyLength = 200

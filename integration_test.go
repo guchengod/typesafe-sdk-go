@@ -151,13 +151,13 @@ func TestIntegrationSystemOne(t *testing.T) {
 		t.Errorf("urgency.Score = %v, want within [0,2]", urgency.Score)
 	}
 	for level := range 3 {
-		legend, present := urgency.Legend[level]
+		legend, present := urgency.LegendFor(level)
 		if !present {
-			t.Errorf("urgency.Legend is missing level %d", level)
+			t.Errorf("urgency legend is missing level %d", level)
 			continue
 		}
 		if want := []string{"can wait", "this week", "today"}[level]; legend != want {
-			t.Errorf("urgency.Legend[%d] = %v, want %q", level, legend, want)
+			t.Errorf("urgency.LegendFor(%d) = %v, want %q", level, legend, want)
 		}
 		if _, present := urgency.Probabilities[level]; !present {
 			t.Errorf("urgency.Probabilities is missing level %d", level)

@@ -161,6 +161,10 @@ const fixedAnswerResponse = `{
 	}
 }`
 
+// fixedAnswersJSON is an answers object covering every question in fixedQuestions, for payloads that
+// exercise an envelope field rather than the answers themselves.
+const fixedAnswersJSON = `{"billing":{"type":"noul","noul":0.98},"tone":{"type":"choice","choice":"angry","confidence":0.9,"probabilities":{"angry":0.9,"calm":0.1}},"urgency":{"type":"score","score":1.7,"confidence":0.8,"legend":{"0":"can wait","1":"this week","2":"today"},"probabilities":{"0":0.1,"1":0.1,"2":0.8}}}`
+
 // fixedQuestions is the question set paired with fixedAnswerResponse.
 func fixedQuestions() Questions {
 	return Questions{

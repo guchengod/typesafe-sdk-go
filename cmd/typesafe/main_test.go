@@ -274,7 +274,7 @@ func TestAskSendsQuestionsAndDecodesAnswers(t *testing.T) {
 func TestAskAuthHeaderUsesTheFlag(t *testing.T) {
 	api := newCLIAPI(t, respondJSON(cliAnswerPayload, http.StatusOK))
 
-	if result := runCLI(t, api, "", "ask", "--state", "hello", "--noul", "q=Is this spam?"); result.code != exitOK {
+	if result := runCLI(t, api, "", "ask", "--state", "hello", "--noul", "billing=Is this spam?"); result.code != exitOK {
 		t.Fatalf("exit code = %d (stderr=%s)", result.code, result.stderr)
 	}
 	if got := api.headers[0].Get("Authorization"); got != "Bearer test-key" {
@@ -287,7 +287,7 @@ func TestAskReadsQuestionsJSONFromFileAndStateFromStdin(t *testing.T) {
 	dir := t.TempDir()
 
 	questions := filepath.Join(dir, "questions.json")
-	content := `{"spam":{"type":"noul","instructions":"Is this spam?"},"queue":{"type":"choice","criteria":{"billing":null,"other":null}}}`
+	content := `{"billing":{"type":"noul","instructions":"Is this spam?"},"tone":{"type":"choice","criteria":{"calm":null,"angry":null}}}`
 	if err := os.WriteFile(questions, []byte(content), 0o600); err != nil {
 		t.Fatal(err)
 	}
@@ -309,7 +309,7 @@ func TestAskReadsQuestionsJSONFromFileAndStateFromStdin(t *testing.T) {
 	}
 
 	// --state - reads the content from stdin.
-	result = runCLI(t, api, "ticket body from stdin", "ask", "--state", "-", "--noul", "q=Is this spam?")
+	result = runCLI(t, api, "ticket body from stdin", "ask", "--state", "-", "--noul", "billing=Is this spam?")
 	if result.code != exitOK {
 		t.Fatalf("stdin state: exit code = %d (stderr=%s)", result.code, result.stderr)
 	}
@@ -361,7 +361,7 @@ func TestAskRejectsMalformedSpecs(t *testing.T) {
 func TestAskTextFormat(t *testing.T) {
 	api := newCLIAPI(t, respondJSON(cliAnswerPayload, http.StatusOK))
 
-	result := runCLI(t, api, "", "ask", "--state", "hello", "--noul", "q=Is this spam?", "--format", "text")
+	result := runCLI(t, api, "", "ask", "--state", "hello", "--noul", "billing=Is this spam?", "--format", "text")
 	if result.code != exitOK {
 		t.Fatalf("exit code = %d (stderr=%s)", result.code, result.stderr)
 	}
@@ -465,7 +465,7 @@ func TestUnknownFlagsAreUsageErrors(t *testing.T) {
 func TestEnvConfiguration(t *testing.T) {
 	api := newCLIAPI(t, respondJSON(cliAnswerPayload, http.StatusOK))
 	questionFile := filepath.Join(t.TempDir(), "questions.json")
-	if err := os.WriteFile(questionFile, []byte(`{"q":{"type":"noul","instructions":"?"}}`), 0o600); err != nil {
+	if err := os.WriteFile(questionFile, []byte(`{"billing":{"type":"noul","instructions":"?"}}`), 0o600); err != nil {
 		t.Fatal(err)
 	}
 
@@ -506,7 +506,7 @@ func TestGlobalFlagsBeforeTheCommand(t *testing.T) {
 
 	var stdout, stderr bytes.Buffer
 	code := run(context.Background(),
-		[]string{"--api-key", "before-key", "--base-url", api.server.URL, "ask", "--state", "hello", "--noul", "q=?"},
+		[]string{"--api-key", "before-key", "--base-url", api.server.URL, "ask", "--state", "hello", "--noul", "billing=?"},
 		&stdout, &stderr, strings.NewReader(""))
 
 	if code != exitOK {

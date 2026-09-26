@@ -64,9 +64,12 @@ type ChoiceAnswer struct {
 
 	// Confidence is the statistical certainty of the choice, from 0 to 1, derived from how the
 	// probability is concentrated across alternatives. Higher values indicate a clear winner; lower
-	// values indicate uncertainty or split probabilities. This is the primary signal for confidence-gated
-	// routing (e.g. act automatically when >= 0.85, seek confirmation when >= 0.50, and route to human
-	// review when < 0.50).
+	// values indicate uncertainty or split probabilities. It is the primary signal for confidence-gated
+	// routing, but where the bands fall is a decision for the caller, because it trades the cost of a
+	// wrong automatic action against the cost of a human review. The docs gate at 0.5 for a
+	// high-stakes decision (https://docs.typesafe.ai/confidence) and at 0.6 for a moderation queue
+	// (https://docs.typesafe.ai/patterns/confidence-routing); treat any number, including 0.5 and
+	// 0.85, as an example rather than an API-defined threshold.
 	Confidence float64 `json:"confidence"`
 
 	// Probabilities is the probability of each criteria key, from 0 to 1.
@@ -96,26 +99,37 @@ type ScoreAnswer struct {
 	// Confidence is the confidence in the rating, from 0 to 1.
 	Confidence float64 `json:"confidence"`
 
-	// Legend maps each rubric level to the criteria description supplied in the request.
-	Legend map[int]any `json:"legend"`
+	// Legend maps each rubric level to the criteria description supplied in the request. Keys are the
+	// level numbers as the API sends them — strings — and the values stay untyped because a level
+	// description may be a string, an object, or an array. [ScoreAnswer.LegendFor] reads a level by
+	// number, the way Probabilities is keyed.
+	Legend map[string]any `json:"legend"`
 
-	// Probabilities is the probability of each rubric level, keyed as in Legend.
+	// Probabilities is the probability of each rubric level, keyed by the integer level number.
 	Probabilities map[int]float64 `json:"probabilities"`
 }
 
 // AnswerType returns the wire discriminator.
 func (a *ScoreAnswer) AnswerType() string { return "score" }
 
-// MarshalJSON encodes the rubric maps with their integer levels as JSON object keys.
+// LegendFor returns the legend entry for a rubric level number, the level Probabilities is keyed by.
+// It reports false when the level is absent from the legend.
+func (a *ScoreAnswer) LegendFor(level int) (any, bool) {
+	if a == nil {
+		return nil, false
+	}
+	description, ok := a.Legend[strconv.Itoa(level)]
+	return description, ok
+}
+
+// MarshalJSON encodes the rubric probabilities with their integer levels as JSON object keys.
 func (a *ScoreAnswer) MarshalJSON() ([]byte, error) {
 	type scoreAnswer ScoreAnswer
 	return json.Marshal(struct {
 		*scoreAnswer
-		Legend        map[string]any     `json:"legend"`
 		Probabilities map[string]float64 `json:"probabilities"`
 	}{
 		scoreAnswer:   (*scoreAnswer)(a),
-		Legend:        stringifyKeys(a.Legend),
 		Probabilities: stringifyKeys(a.Probabilities),
 	})
 }
@@ -496,10 +510,11 @@ func decodeText(raw json.RawMessage) (string, bool) {
 
 // parseSystemOneResponse decodes a System One success response.
 //
-// The model and usage fields are required; answers is optional and defaults to empty. An answer
-// whose type this SDK version does not model is skipped with a warning, leaving the full payload
-// available through [SystemOneResponse.RawBody].
-func parseSystemOneResponse(resp *response, logger *slog.Logger) (*SystemOneResponse, error) {
+// The model, usage, and answers fields are required, and answers must carry one entry per requested
+// question, because the API answers every question it accepts. An answer whose type this SDK version
+// does not model is skipped with a warning, leaving the full payload available through
+// [SystemOneResponse.RawBody].
+func parseSystemOneResponse(resp *response, questions []string, logger *slog.Logger) (*SystemOneResponse, error) {
 	d := newDecoder(resp)
 	if err := openInto(d, &d.envelope); err != nil {
 		return nil, err
@@ -520,24 +535,29 @@ func parseSystemOneResponse(resp *response, logger *slog.Logger) (*SystemOneResp
 	if err := d.decodeUsage(&result.Usage); err != nil {
 		return nil, err
 	}
-	if raw := d.envelope.Answers; raw != nil {
-		// Absent answers default to empty; an explicit null is malformed, because null is not a
-		// JSON object and would otherwise decode to the same empty map.
-		if isJSONNull(raw) {
-			return nil, d.invalid("answers")
-		}
-		if err := parseAnswers(raw, result, d, logger); err != nil {
-			return nil, err
-		}
+	if isJSONNull(d.envelope.Answers) {
+		// An absent or null answers object is malformed: every accepted request has questions, and
+		// the API answers all of them.
+		return nil, d.invalid("answers")
+	}
+	if err := parseAnswers(d.envelope.Answers, questions, result, d, logger); err != nil {
+		return nil, err
 	}
 	return result, nil
 }
 
-// parseAnswers decodes the answers object into typed answers plus the grouped accessors.
-func parseAnswers(raw json.RawMessage, result *SystemOneResponse, d *decoder, logger *slog.Logger) error {
+// parseAnswers decodes the answers object into typed answers plus the grouped accessors. Every
+// requested question must be present; the check runs before any answer is decoded, so a missing
+// answer is reported even when a later entry is malformed.
+func parseAnswers(raw json.RawMessage, questions []string, result *SystemOneResponse, d *decoder, logger *slog.Logger) error {
 	entries, ok := objectEntries(raw)
 	if !ok {
 		return d.invalid("answers")
+	}
+	for _, name := range questions {
+		if _, present := entries[name]; !present {
+			return d.invalid(answerPath(name))
+		}
 	}
 	for name, entry := range entries {
 		answer, err := parseAnswer(name, entry, d)
@@ -626,7 +646,7 @@ func parseAnswer(name string, raw json.RawMessage, d *decoder) (Answer, error) {
 		if err != nil {
 			return nil, err
 		}
-		legend, err := levelMap(fields, "legend", name, d)
+		legend, err := legendMap(fields, "legend", name, d)
 		if err != nil {
 			return nil, err
 		}
@@ -669,13 +689,15 @@ func floatMap(fields map[string]json.RawMessage, field, name string, d *decoder)
 	return decoded, nil
 }
 
-// levelMap decodes a field holding a JSON object keyed by integer rubric levels.
-func levelMap(fields map[string]json.RawMessage, field, name string, d *decoder) (map[int]any, error) {
+// legendMap decodes a field holding a JSON object keyed by rubric level. Keys stay as the strings the
+// API sends them as, because the reference types the legend as map<string, string> and only its value
+// is ever interpreted.
+func legendMap(fields map[string]json.RawMessage, field, name string, d *decoder) (map[string]any, error) {
 	raw, ok := fields[field]
 	if !ok || isJSONNull(raw) {
 		return nil, d.invalid(answerPath(name, field))
 	}
-	var direct map[int]any
+	var direct map[string]any
 	if err := json.Unmarshal(raw, &direct); err == nil {
 		return direct, nil
 	}
@@ -683,17 +705,13 @@ func levelMap(fields map[string]json.RawMessage, field, name string, d *decoder)
 	if !ok {
 		return nil, d.invalid(answerPath(name, field))
 	}
-	decoded := make(map[int]any, len(entries))
+	decoded := make(map[string]any, len(entries))
 	for key, entry := range entries {
-		level, err := strconv.Atoi(key)
-		if err != nil {
-			return nil, d.invalid(answerPath(name, field, key))
-		}
 		var item any
 		if err := json.Unmarshal(entry, &item); err != nil {
 			return nil, d.invalid(answerPath(name, field, key))
 		}
-		decoded[level] = item
+		decoded[key] = item
 	}
 	return decoded, nil
 }

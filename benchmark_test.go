@@ -77,10 +77,28 @@ func benchmarkMockClient(b *testing.B, body string) (*Client, *mockTransport) {
 	return client, transport
 }
 
+// benchmarkAnswerIDs returns the answer ids a benchmark payload carries. The response parser checks
+// that every requested question was answered, so these ids stand in for the questions asked.
+func benchmarkAnswerIDs(b *testing.B, body string) []string {
+	b.Helper()
+	var document struct {
+		Answers map[string]json.RawMessage `json:"answers"`
+	}
+	if err := json.Unmarshal([]byte(body), &document); err != nil {
+		b.Fatalf("benchmark payload is not valid JSON: %v", err)
+	}
+	names := make([]string, 0, len(document.Answers))
+	for name := range document.Answers {
+		names = append(names, name)
+	}
+	slices.Sort(names)
+	return names
+}
+
 // BenchmarkSystemOneResponseDecode measures decoding a System One success payload: once for the
 // smallest complete response, once for a payload carrying all three answer kinds.
 //
-// Allocs/op: subset 47 (3.5 KB), full 121 (8.1 KB).
+// Allocs/op: subset 38 (3.0 KB), full 87 (6.1 KB).
 func BenchmarkSystemOneResponseDecode(b *testing.B) {
 	logger := benchmarkLogger()
 	for _, testCase := range []struct {
@@ -92,10 +110,11 @@ func BenchmarkSystemOneResponseDecode(b *testing.B) {
 	} {
 		b.Run(testCase.name, func(b *testing.B) {
 			resp := benchmarkResponse(testCase.body)
+			questions := benchmarkAnswerIDs(b, testCase.body)
 			b.ReportAllocs()
 			b.SetBytes(int64(len(testCase.body)))
 			for b.Loop() {
-				parsed, err := parseSystemOneResponse(resp, logger)
+				parsed, err := parseSystemOneResponse(resp, questions, logger)
 				if err != nil {
 					b.Fatalf("parseSystemOneResponse() error = %v", err)
 				}

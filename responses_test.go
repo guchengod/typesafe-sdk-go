@@ -132,7 +132,7 @@ func TestSystemOneResponseHappyPath(t *testing.T) {
 	if urgency.AnswerType() != "score" || urgency.Score != 1.7 || urgency.Confidence != 0.8 {
 		t.Errorf("urgency = %+v, want score 1.7 at 0.8", urgency)
 	}
-	if !reflect.DeepEqual(urgency.Legend, map[int]any{0: "can wait", 1: "this week", 2: "today"}) {
+	if !reflect.DeepEqual(urgency.Legend, map[string]any{"0": "can wait", "1": "this week", "2": "today"}) {
 		t.Errorf("urgency.Legend = %#v", urgency.Legend)
 	}
 	if !reflect.DeepEqual(urgency.Probabilities, map[int]float64{0: 0.1, 1: 0.1, 2: 0.8}) {
@@ -181,33 +181,42 @@ func TestSystemOneResponseHappyPath(t *testing.T) {
 	}
 }
 
-func TestSystemOneResponseAnswersDefaultsToEmpty(t *testing.T) {
+// TestSystemOneResponseRequiresAnswers checks that a success response answers every question it was
+// asked: the answers object may not be absent, null, empty, or short an entry.
+func TestSystemOneResponseRequiresAnswers(t *testing.T) {
+	const endpoint = "POST https://api.typesafe.ai/v1/systemone"
 	cases := []struct {
 		name string
 		body string
+		path string
 	}{
-		{"absent", `{"model":"test","usage":{"input_tokens":1,"output_tokens":1}}`},
-		{"empty object", `{"model":"test","usage":{"input_tokens":1,"output_tokens":1},"answers":{}}`},
+		{
+			name: "absent",
+			body: `{"model":"test","usage":{"input_tokens":1,"output_tokens":1}}`,
+			path: "answers",
+		},
+		{
+			name: "null",
+			body: `{"model":"test","usage":{"input_tokens":1,"output_tokens":1},"answers":null}`,
+			path: "answers",
+		},
+		{
+			name: "empty object",
+			body: `{"model":"test","usage":{"input_tokens":1,"output_tokens":1},"answers":{}}`,
+			path: "answers.billing",
+		},
+		{
+			name: "one question unanswered",
+			body: `{"model":"test","usage":{"input_tokens":1,"output_tokens":1},"answers":{"billing":{"type":"noul","noul":0.98}}}`,
+			path: "answers.tone",
+		},
 	}
 	for _, testCase := range cases {
 		t.Run(testCase.name, func(t *testing.T) {
-			client := responseTestJSONClient(t, testCase.body, "req-1")
+			client := responseTestJSONClient(t, testCase.body, "req-123")
 
-			response, err := client.SystemOne(t.Context(), "state", fixedQuestions())
-			if err != nil {
-				t.Fatalf("SystemOne() error = %v", err)
-			}
-			if response.Answers == nil || len(response.Answers) != 0 {
-				t.Errorf("Answers = %#v, want an empty non-nil map", response.Answers)
-			}
-			if response.Nouls() == nil || response.Choices() == nil || response.Scores() == nil {
-				t.Errorf("grouped views = (%v, %v, %v), want all non-nil",
-					response.Nouls(), response.Choices(), response.Scores())
-			}
-			if len(response.Nouls()) != 0 || len(response.Choices()) != 0 || len(response.Scores()) != 0 {
-				t.Errorf("grouped views = (%d, %d, %d) entries, want none",
-					len(response.Nouls()), len(response.Choices()), len(response.Scores()))
-			}
+			_, err := client.SystemOne(t.Context(), "state", fixedQuestions())
+			responseTestAssertValidationError(t, err, endpoint, testCase.path, "req-123", testCase.body)
 		})
 	}
 }
@@ -261,7 +270,6 @@ func TestSystemOneResponseMalformedPayloads(t *testing.T) {
 		{name: "score missing confidence", answer: `"s":{"type":"score","score":1.0,"legend":{},"probabilities":{}}`, path: "answers.s.confidence"},
 		{name: "score missing legend", answer: `"s":{"type":"score","score":1.0,"confidence":1.0,"probabilities":{}}`, path: "answers.s.legend"},
 		{name: "score legend not an object", answer: `"s":{"type":"score","score":1.0,"confidence":1.0,"legend":[],"probabilities":{}}`, path: "answers.s.legend"},
-		{name: "score legend key not an integer", answer: `"s":{"type":"score","score":1.0,"confidence":1.0,"legend":{"x":"bad"},"probabilities":{}}`, path: "answers.s.legend.x"},
 		{name: "score missing probabilities", answer: `"s":{"type":"score","score":1.0,"confidence":1.0,"legend":{}}`, path: "answers.s.probabilities"},
 		{name: "score probabilities not an object", answer: `"s":{"type":"score","score":1.0,"confidence":1.0,"legend":{},"probabilities":[]}`, path: "answers.s.probabilities"},
 		{name: "score probabilities key not an integer", answer: `"s":{"type":"score","score":1.0,"confidence":1.0,"legend":{},"probabilities":{"x":0.5}}`, path: "answers.s.probabilities.x"},
@@ -276,9 +284,55 @@ func TestSystemOneResponseMalformedPayloads(t *testing.T) {
 			}
 			client := responseTestJSONClient(t, body, "req-123")
 
-			_, err := client.SystemOne(t.Context(), "state", fixedQuestions())
+			_, err := client.SystemOne(t.Context(), "state", questionsCovering(t, body))
 			responseTestAssertValidationError(t, err, endpoint, testCase.path, "req-123", body)
 		})
+	}
+}
+
+// questionsCovering returns one question per answer id in body, so a malformed payload reaches the
+// field under test instead of failing the check that every question was answered.
+func questionsCovering(t *testing.T, body string) Questions {
+	t.Helper()
+	var document struct {
+		Answers map[string]json.RawMessage `json:"answers"`
+	}
+	// An answers value that is not an object yields no ids; the placeholder question below still
+	// reaches the field under test, because the SDK rejects the whole answers value first.
+	_ = json.Unmarshal([]byte(body), &document)
+	questions := make(Questions, len(document.Answers))
+	for name := range document.Answers {
+		questions[name] = NewNoul("Placeholder?")
+	}
+	if len(questions) == 0 {
+		questions["q"] = NewNoul("Placeholder?")
+	}
+	return questions
+}
+
+// TestScoreAnswerLegendKeepsTheAPIsKeys checks the legend is decoded as the reference types it — an
+// object keyed by whatever the API sends — rather than demanding integer keys.
+func TestScoreAnswerLegendKeepsTheAPIsKeys(t *testing.T) {
+	const body = `{"model":"test","usage":{"input_tokens":1,"output_tokens":1},"answers":{"urgency":{"type":"score","score":1.0,"confidence":0.9,"legend":{"0":"can wait","1":"today","note":"levels are illustrative"},"probabilities":{"0":0.5,"1":0.5}}}}`
+	client := responseTestJSONClient(t, body, "")
+
+	response, err := client.SystemOne(t.Context(), "state", Questions{"urgency": NewScore([]any{"can wait", "today"})})
+	if err != nil {
+		t.Fatalf("SystemOne() error = %v", err)
+	}
+	urgency := response.Scores()["urgency"]
+	if urgency == nil {
+		t.Fatal("Scores()[urgency] = nil, want a score answer")
+	}
+	want := map[string]any{"0": "can wait", "1": "today", "note": "levels are illustrative"}
+	if !reflect.DeepEqual(urgency.Legend, want) {
+		t.Errorf("Legend = %#v, want %#v", urgency.Legend, want)
+	}
+	if legend, present := urgency.LegendFor(1); !present || legend != "today" {
+		t.Errorf("LegendFor(1) = %#v, %v, want %q, true", legend, present, "today")
+	}
+	if !reflect.DeepEqual(urgency.Probabilities, map[int]float64{0: 0.5, 1: 0.5}) {
+		t.Errorf("Probabilities = %#v, want %#v", urgency.Probabilities, map[int]float64{0: 0.5, 1: 0.5})
 	}
 }
 
@@ -341,7 +395,10 @@ func TestSystemOneResponseDropsUnknownAnswerType(t *testing.T) {
 	logger, logs := capturedLogs()
 	client := responseTestJSONClient(t, body, "req-9", WithLogger(logger))
 
-	response, err := client.SystemOne(t.Context(), "state", fixedQuestions())
+	response, err := client.SystemOne(t.Context(), "state", Questions{
+		"spam":    NewNoul("Is this spam?"),
+		"mystery": RawQuestion{"type": "aurora", "value": 3},
+	})
 	if err != nil {
 		t.Fatalf("SystemOne() error = %v", err)
 	}
@@ -396,7 +453,7 @@ func TestSystemOneResponseToleratesUnknownFields(t *testing.T) {
 	}`
 	client := responseTestJSONClient(t, body, "")
 
-	response, err := client.SystemOne(t.Context(), "state", fixedQuestions())
+	response, err := client.SystemOne(t.Context(), "state", Questions{"spam": NewNoul("Is this spam?")})
 	if err != nil {
 		t.Fatalf("SystemOne() error = %v", err)
 	}
@@ -435,7 +492,7 @@ func TestSystemOneResponsePreservesNestedLegendJSON(t *testing.T) {
 	}`
 	client := responseTestJSONClient(t, body, "")
 
-	response, err := client.SystemOne(t.Context(), "state", fixedQuestions())
+	response, err := client.SystemOne(t.Context(), "state", Questions{"quality": NewScore([]any{"low", "high"})})
 	if err != nil {
 		t.Fatalf("SystemOne() error = %v", err)
 	}
@@ -443,7 +500,7 @@ func TestSystemOneResponsePreservesNestedLegendJSON(t *testing.T) {
 	if answer == nil {
 		t.Fatal("Scores()[quality] = nil, want a score answer")
 	}
-	want := map[int]any{0: map[string]any{"examples": []any{"a", map[string]any{"note": nil}}}}
+	want := map[string]any{"0": map[string]any{"examples": []any{"a", map[string]any{"note": nil}}}}
 	if !reflect.DeepEqual(answer.Legend, want) {
 		t.Errorf("Legend = %#v, want %#v", answer.Legend, want)
 	}
@@ -592,7 +649,7 @@ func TestScoreAnswerMarshalJSONEncodesLevelsAsObjectKeys(t *testing.T) {
 		Type:          "score",
 		Score:         1.7,
 		Confidence:    0.8,
-		Legend:        map[int]any{0: "can wait", 1: "this week", 2: "today"},
+		Legend:        map[string]any{"0": "can wait", "1": "this week", "2": "today"},
 		Probabilities: map[int]float64{0: 0.1, 1: 0.1, 2: 0.8},
 	}
 	encoded, err := json.Marshal(answer)
@@ -871,8 +928,8 @@ func TestSystemOneAsLiftsAnswersOntoCustomStruct(t *testing.T) {
 	if result.Urgency.Type != "score" || result.Urgency.Score != 1.7 || result.Urgency.Confidence != 0.8 {
 		t.Errorf("Urgency = %+v, want score 1.7 at 0.8", result.Urgency)
 	}
-	if got := result.Urgency.Legend[2]; got != "today" {
-		t.Errorf("Urgency.Legend[2] = %#v, want %q", got, "today")
+	if legend, present := result.Urgency.LegendFor(2); !present || legend != "today" {
+		t.Errorf("Urgency.LegendFor(2) = %#v, want %q", legend, "today")
 	}
 	if result.Urgency.Probabilities[2] != 0.8 {
 		t.Errorf("Urgency.Probabilities[2] = %v, want 0.8", result.Urgency.Probabilities[2])
@@ -934,7 +991,7 @@ func TestSystemOneAsMissingRequiredField(t *testing.T) {
 	})
 
 	t.Run("null value for non-nullable required field", func(t *testing.T) {
-		const nullBody = `{"model":"test","usage":{"input_tokens":1},"answers":{},"required":null}`
+		const nullBody = `{"model":"test","usage":{"input_tokens":1},"answers":` + fixedAnswersJSON + `,"required":null}`
 		nullClient := responseTestJSONClient(t, nullBody, "req-null")
 		_, err := SystemOneAs[responseTestRequired](t.Context(), nullClient, "state", fixedQuestions())
 		responseTestAssertValidationError(t, err, "POST https://api.typesafe.ai/v1/systemone", "required", "req-null", nullBody)
@@ -966,7 +1023,10 @@ func TestSystemOneAsExcludesUnknownAnswerTypes(t *testing.T) {
 	}`
 	client := responseTestJSONClient(t, body, "")
 
-	result, err := SystemOneAs[responseTestUnknownAnswers](t.Context(), client, "state", fixedQuestions())
+	result, err := SystemOneAs[responseTestUnknownAnswers](t.Context(), client, "state", Questions{
+		"spam":    NewNoul("Is this spam?"),
+		"mystery": RawQuestion{"type": "aurora", "value": 1},
+	})
 	if err != nil {
 		t.Fatalf("SystemOneAs() error = %v", err)
 	}
@@ -1083,8 +1143,10 @@ func TestAnswersDecodesByDiscriminator(t *testing.T) {
 	if choice, ok := decoded["tone"].(*ChoiceAnswer); !ok || choice.Choice != "angry" {
 		t.Errorf("tone = %#v, want a choice answer of angry", decoded["tone"])
 	}
-	if score, ok := decoded["urgency"].(*ScoreAnswer); !ok || score.Legend[0] != "can wait" {
+	if score, ok := decoded["urgency"].(*ScoreAnswer); !ok {
 		t.Errorf("urgency = %#v, want a score answer with a legend", decoded["urgency"])
+	} else if legend, present := score.LegendFor(0); !present || legend != "can wait" {
+		t.Errorf("urgency legend[0] = %#v, want %q", legend, "can wait")
 	}
 }
 
@@ -1128,6 +1190,6 @@ func TestAnswersCarriesResponseValidationPath(t *testing.T) {
 	body := `{"model":"test","usage":{"input_tokens":1,"output_tokens":1},"answers":{"q":{"type":"noul"}}}`
 	client := responseTestJSONClient(t, body, "req-answers")
 
-	_, err := SystemOneAs[custom](t.Context(), client, "state", fixedQuestions())
+	_, err := SystemOneAs[custom](t.Context(), client, "state", Questions{"q": NewNoul("Placeholder?")})
 	responseTestAssertValidationError(t, err, "POST https://api.typesafe.ai/v1/systemone", "answers.q.noul", "req-answers", body)
 }

@@ -105,7 +105,7 @@ TypeSafe's **Jev** is a calibrated System One model designed for fast, discrete 
 
 ### 1. Confidence-Gated Routing (置信度三段式路由)
 
-Every `Choice` and `Score` answer includes a `Confidence` score between `0.0` and `1.0`, derived from how probability mass concentrates across alternatives. Use confidence as an operational control axis:
+Every `Choice` and `Score` answer includes a `Confidence` score between `0.0` and `1.0`, derived from how probability mass concentrates across alternatives. Use confidence as an operational control axis — the thresholds below are an example, not an API-defined rule: the docs gate at `0.5` for a high-stakes decision ([confidence](https://docs.typesafe.ai/confidence)) and at `0.6` for a moderation queue ([confidence routing](https://docs.typesafe.ai/patterns/confidence-routing)).
 
 ```go
 category := response.Choices()["category"]

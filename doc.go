@@ -74,7 +74,11 @@
 // judgment, and routing, but does not perform open-ended text generation or reliable numeric arithmetic.
 //
 // 1. Confidence-Gated Routing:
-// Choice and Score answers include a statistical Confidence (0 to 1). A proven pattern is to tier actions:
+// Choice and Score answers include a statistical Confidence (0 to 1). A proven pattern is to tier
+// actions. The bands below are an example: the boundaries are yours to choose, because they trade the
+// cost of a wrong automatic action against the cost of a review. The docs gate at 0.5 for a
+// high-stakes decision (https://docs.typesafe.ai/confidence) and at 0.6 for a moderation queue
+// (https://docs.typesafe.ai/patterns/confidence-routing).
 //
 //	switch {
 //	case answer.Confidence >= 0.85:
@@ -96,6 +100,14 @@
 //
 // 4. Choice Questions:
 // Choice questions support up to 255 options per question.
+//
+// 5. What the SDK Validates:
+// Questions are checked locally for the shape the request schema requires: a question type, criteria
+// for a choice or a score question, at least one and at most 255 options for a choice, and between 2
+// and 10 levels for a score. Fields the schema makes optional — instructions above all — are sent
+// only when the caller sets them; the HTTP reference page marks instructions required, but the
+// request schema requires only criteria, for choice and score, so the SDK lets the API judge a
+// question that omits them.
 //
 // # Errors
 //

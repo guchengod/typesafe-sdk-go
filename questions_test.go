@@ -4,7 +4,9 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
+	"sort"
 	"strings"
 	"testing"
 )
@@ -72,15 +74,50 @@ func questionsAssertNoError(t *testing.T, err error) {
 	}
 }
 
-// questionsJSONResponse is a minimal decodable System One payload: model and usage are required.
-const questionsJSONResponse = `{"model":"jev-latest","usage":{},"answers":{}}`
-
-// newQuestionsClient returns a mock client that answers every request with questionsJSONResponse.
+// newQuestionsClient returns a mock client whose API answers every question in the request, the way
+// the real API does, so a test that only asserts the request still receives a decodable response.
 func newQuestionsClient(t *testing.T, opts ...Option) (*Client, *mockTransport) {
 	t.Helper()
-	return newMockClient(t, func(*http.Request, int) *http.Response {
-		return JSONResponse(http.StatusOK, questionsJSONResponse)
+	return newMockClient(t, func(request *http.Request, _ int) *http.Response {
+		return JSONResponse(http.StatusOK, answeringQuestionsJSON(t, request))
 	}, opts...)
+}
+
+// answeringQuestionsJSON builds a success payload with one noul answer per question id the request
+// carries. The transport drains the request body before the handler runs, so the body is replayed
+// through GetBody, which http.NewRequest sets for a byte slice.
+func answeringQuestionsJSON(t *testing.T, request *http.Request) string {
+	t.Helper()
+	var body []byte
+	if request.GetBody != nil {
+		reader, err := request.GetBody()
+		if err != nil {
+			t.Fatalf("replaying the request body: %v", err)
+		}
+		read, err := io.ReadAll(reader)
+		if err != nil {
+			t.Fatalf("reading the request body: %v", err)
+		}
+		body = read
+	}
+	var sent struct {
+		Questions map[string]json.RawMessage `json:"questions"`
+	}
+	_ = json.Unmarshal(body, &sent)
+	names := make([]string, 0, len(sent.Questions))
+	for name := range sent.Questions {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	answers := make([]string, 0, len(names))
+	for _, name := range names {
+		key, err := json.Marshal(name)
+		if err != nil {
+			t.Fatalf("encoding the question id %q: %v", name, err)
+		}
+		answers = append(answers, fmt.Sprintf("%s:{\"type\":\"noul\",\"noul\":0.9}", key))
+	}
+	return fmt.Sprintf(`{"model":"jev-latest","usage":{},"answers":{%s}}`, strings.Join(answers, ","))
 }
 
 // TestQuestionsMarshalWireForms pins the JSON form of every modeled question type: optional
@@ -212,9 +249,9 @@ func TestQuestionsMarshalWireForms(t *testing.T) {
 			want:     map[string]any{"type": "choice", "criteria": nil},
 		},
 		{
-			name:     "choice with an empty criteria map keeps an empty object",
-			question: NewChoice(map[string]any{}),
-			want:     map[string]any{"type": "choice", "criteria": map[string]any{}},
+			name:     "choice with one option keeps the criteria object",
+			question: NewChoice(map[string]any{"calm": nil}, WithInstructions("What is the tone?")),
+			want:     map[string]any{"type": "choice", "instructions": "What is the tone?", "criteria": map[string]any{"calm": nil}},
 		},
 		{
 			name: "choice with structured descriptions",
@@ -307,8 +344,17 @@ func TestQuestionsTypeDiscriminators(t *testing.T) {
 		t.Errorf("ScoreQuestion.Type = %q, want %q", got, "score")
 	}
 
-	// A bare statement with neither instructions nor criteria is still a valid noul: the server
-	// interprets it.
+	// The request schema requires no instructions field: only criteria is required, and only for a
+	// choice or a score question, so a question that omits instructions is accepted rather than
+	// stopped locally.
+	for name, question := range map[string]Question{
+		"choice without instructions": NewChoice(map[string]any{"calm": nil}),
+		"score without instructions":  NewScore([]any{"low", "high"}),
+	} {
+		if err := question.Validate("q"); err != nil {
+			t.Errorf("Validate() on a %s = %v, want nil", name, err)
+		}
+	}
 	if err := NewNoul(nil).Validate("q"); err != nil {
 		t.Errorf("Validate() on a bare noul = %v, want nil", err)
 	}
@@ -665,6 +711,7 @@ func TestNormalizeQuestionsRejectsNonQuestionValues(t *testing.T) {
 func TestNormalizeQuestionsRawQuestionStructuralChecks(t *testing.T) {
 	const missingType = `Question "x" must be a question object or a map with a nonempty string "type".`
 	const requiresCriteria = `Question "x" requires "criteria".`
+	const requiresOption = `Question "x" requires at least one option in "criteria".`
 	tests := []struct {
 		name  string
 		value any
@@ -679,6 +726,7 @@ func TestNormalizeQuestionsRawQuestionStructuralChecks(t *testing.T) {
 		{name: "choice without a criteria key", value: map[string]any{"type": "choice"}, want: requiresCriteria},
 		{name: "score without a criteria key", value: map[string]any{"type": "score"}, want: requiresCriteria},
 		{name: "typed raw choice without a criteria key", value: RawQuestion{"type": "choice"}, want: requiresCriteria},
+		{name: "choice with an empty criteria object", value: map[string]any{"type": "choice", "criteria": map[string]any{}}, want: requiresOption},
 		// Accepted raw questions: an unknown type passes through, and a noul needs no criteria.
 		{name: "unknown type", value: map[string]any{"type": "future", "nested": map[string]any{"k": nil}}},
 		{name: "noul without criteria", value: map[string]any{"type": "noul"}},
@@ -687,7 +735,6 @@ func TestNormalizeQuestionsRawQuestionStructuralChecks(t *testing.T) {
 		{name: "noul with an explicit null instruction", value: map[string]any{"type": "noul", "instructions": nil, "criteria": nil}},
 		{name: "choice with an explicit null instruction", value: map[string]any{"type": "choice", "instructions": nil, "criteria": map[string]any{"a": nil}}},
 		{name: "choice with nil criteria", value: map[string]any{"type": "choice", "criteria": nil}},
-		{name: "choice with empty criteria", value: map[string]any{"type": "choice", "criteria": map[string]any{}}},
 	}
 
 	for _, test := range tests {
@@ -799,11 +846,9 @@ func TestNormalizeQuestionsChoiceCriteriaValidation(t *testing.T) {
 		questionsAssertError(t, err, requiresCriteria)
 	})
 
-	t.Run("typed choice with empty criteria is accepted", func(t *testing.T) {
-		normalized, err := NormalizeQuestions(Questions{"q": NewChoice(map[string]any{})})
-		questionsAssertNoError(t, err)
-		questionsAssertEqual(t, "normalized question", questionsWire(t, normalized["q"]),
-			map[string]any{"type": "choice", "criteria": map[string]any{}})
+	t.Run("typed choice with empty criteria is rejected", func(t *testing.T) {
+		_, err := NormalizeQuestions(Questions{"q": NewChoice(map[string]any{})})
+		questionsAssertError(t, err, `Question "q" requires at least one option in "criteria".`)
 	})
 
 	t.Run("typed choice with > 255 options is rejected", func(t *testing.T) {

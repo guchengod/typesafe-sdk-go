@@ -79,8 +79,13 @@ func resolveQuestionOptions(opts []QuestionOption) questionOptions {
 }
 
 // resolveInstructions picks the instructions for a question: an explicit [WithInstructions] wins
-// over the value passed positionally. Instructions that are absent or blank are left off the wire,
-// because the server treats a question with neither instructions nor criteria as malformed.
+// over the value passed positionally. Instructions that are absent or blank are left off the wire
+// rather than encoded as null.
+//
+// The request schema requires no instructions field — for a choice or score question it requires only
+// criteria, and for a noul it requires nothing — so the SDK sends what the caller provides and lets
+// the API judge a question whose instructions are missing. The "required" marker on the HTTP
+// reference page is not something this SDK enforces.
 func resolveInstructions(positional any, options questionOptions) any {
 	instructions := positional
 	if options.instructions != nil {
@@ -108,8 +113,8 @@ type NoulQuestion struct {
 	extra map[string]any
 }
 
-// NewNoul creates a yes/no question. The instructions may be a string, a map, or a slice, and may
-// be nil when criteria alone describe the question.
+// NewNoul creates a yes/no question. The instructions may be a string, a map, or a slice, and may be
+// nil when criteria alone describe the question; the request schema requires neither field.
 //
 //	typesafe.NewNoul("Is this message spam?")
 //	typesafe.NewNoul("Is this spam?", typesafe.WithNoulCriteria(typesafe.NoulCriteria{
@@ -131,7 +136,8 @@ func NewNoul(instructions any, opts ...QuestionOption) *NoulQuestion {
 // QuestionType returns the wire discriminator.
 func (q *NoulQuestion) QuestionType() string { return "noul" }
 
-// Validate accepts every noul question; the server interprets a bare statement with no criteria.
+// Validate accepts every noul question. The request schema requires no field for a noul, so a bare
+// statement, a statement with criteria, and criteria alone are all well-formed requests.
 func (q *NoulQuestion) Validate(string) error { return nil }
 
 // MarshalJSON encodes the question, including any fields added by [WithQuestionField].
@@ -179,10 +185,14 @@ func NewChoice(criteria map[string]any, opts ...QuestionOption) *ChoiceQuestion 
 // QuestionType returns the wire discriminator.
 func (q *ChoiceQuestion) QuestionType() string { return "choice" }
 
-// Validate reports a question that has no criteria or exceeds 255 options.
+// Validate reports a choice question with no criteria at all, with an empty criteria object, or with
+// more than 255 options.
 func (q *ChoiceQuestion) Validate(name string) error {
 	if q.Criteria == nil {
 		return &SDKError{Message: fmt.Sprintf("Question %q requires \"criteria\".", name)}
+	}
+	if len(q.Criteria) == 0 {
+		return &SDKError{Message: fmt.Sprintf("Question %q requires at least one option in \"criteria\".", name)}
 	}
 	if len(q.Criteria) > 255 {
 		if name != "" {
@@ -280,9 +290,9 @@ func (q RawQuestion) QuestionType() string {
 	return questionType
 }
 
-// Validate applies the structural checks the SDK can make without duplicating the server's
-// schema: the type must be a non-empty string, and a choice or score question must carry
-// criteria.
+// Validate applies the structural checks the SDK can make without duplicating the server's schema:
+// the type must be a non-empty string, and a choice or score question must carry criteria. A choice
+// question must also declare a countable number of options, between one and 255.
 func (q RawQuestion) Validate(name string) error {
 	questionType, ok := q["type"].(string)
 	if !ok || questionType == "" {
@@ -298,25 +308,38 @@ func (q RawQuestion) Validate(name string) error {
 		return &SDKError{Message: fmt.Sprintf("Question %q requires \"criteria\".", name)}
 	}
 	if questionType == "choice" {
-		if rawMsg, ok := criteria.(json.RawMessage); ok {
-			var rawMap map[string]json.RawMessage
-			if err := json.Unmarshal(rawMsg, &rawMap); err == nil && len(rawMap) > 255 {
+		if options, ok := choiceOptionCount(criteria); ok {
+			if options == 0 {
+				return &SDKError{Message: fmt.Sprintf("Question %q requires at least one option in \"criteria\".", name)}
+			}
+			if options > 255 {
 				if name != "" {
 					return &SDKError{Message: fmt.Sprintf("Choice question %q exceeds maximum of 255 options.", name)}
 				}
 				return &SDKError{Message: "Choice question exceeds maximum of 255 options."}
 			}
-		} else if v := reflect.ValueOf(criteria); v.IsValid() && v.Kind() == reflect.Map && v.Len() > 255 {
-			if name != "" {
-				return &SDKError{Message: fmt.Sprintf("Choice question %q exceeds maximum of 255 options.", name)}
-			}
-			return &SDKError{Message: "Choice question exceeds maximum of 255 options."}
 		}
 	}
 	if questionType == "score" && isInvalidScoreCriteria(criteria) {
 		return &ScoreError{Name: name}
 	}
 	return nil
+}
+
+// choiceOptionCount reports how many options a raw choice question declares, when its criteria value
+// is an object the SDK can count.
+func choiceOptionCount(criteria any) (int, bool) {
+	if rawMsg, ok := criteria.(json.RawMessage); ok {
+		var options map[string]json.RawMessage
+		if err := json.Unmarshal(rawMsg, &options); err != nil {
+			return 0, false
+		}
+		return len(options), true
+	}
+	if value := reflect.ValueOf(criteria); value.IsValid() && value.Kind() == reflect.Map {
+		return value.Len(), true
+	}
+	return 0, false
 }
 
 // isInvalidScoreCriteria reports whether a raw criteria value does not have between 2 and 10 score levels.
