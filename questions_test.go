@@ -117,7 +117,7 @@ func answeringQuestionsJSON(t *testing.T, request *http.Request) string {
 		}
 		answers = append(answers, fmt.Sprintf("%s:{\"type\":\"noul\",\"noul\":0.9}", key))
 	}
-	return fmt.Sprintf(`{"model":"jev-latest","usage":{},"answers":{%s}}`, strings.Join(answers, ","))
+	return fmt.Sprintf(`{"model":"jev-latest","usage":{"input_tokens":12,"output_tokens":3},"answers":{%s}}`, strings.Join(answers, ","))
 }
 
 // TestQuestionsMarshalWireForms pins the JSON form of every modeled question type: optional
@@ -711,7 +711,6 @@ func TestNormalizeQuestionsRejectsNonQuestionValues(t *testing.T) {
 func TestNormalizeQuestionsRawQuestionStructuralChecks(t *testing.T) {
 	const missingType = `Question "x" must be a question object or a map with a nonempty string "type".`
 	const requiresCriteria = `Question "x" requires "criteria".`
-	const requiresOption = `Question "x" requires at least one option in "criteria".`
 	tests := []struct {
 		name  string
 		value any
@@ -726,7 +725,6 @@ func TestNormalizeQuestionsRawQuestionStructuralChecks(t *testing.T) {
 		{name: "choice without a criteria key", value: map[string]any{"type": "choice"}, want: requiresCriteria},
 		{name: "score without a criteria key", value: map[string]any{"type": "score"}, want: requiresCriteria},
 		{name: "typed raw choice without a criteria key", value: RawQuestion{"type": "choice"}, want: requiresCriteria},
-		{name: "choice with an empty criteria object", value: map[string]any{"type": "choice", "criteria": map[string]any{}}, want: requiresOption},
 		// Accepted raw questions: an unknown type passes through, and a noul needs no criteria.
 		{name: "unknown type", value: map[string]any{"type": "future", "nested": map[string]any{"k": nil}}},
 		{name: "noul without criteria", value: map[string]any{"type": "noul"}},
@@ -735,6 +733,7 @@ func TestNormalizeQuestionsRawQuestionStructuralChecks(t *testing.T) {
 		{name: "noul with an explicit null instruction", value: map[string]any{"type": "noul", "instructions": nil, "criteria": nil}},
 		{name: "choice with an explicit null instruction", value: map[string]any{"type": "choice", "instructions": nil, "criteria": map[string]any{"a": nil}}},
 		{name: "choice with nil criteria", value: map[string]any{"type": "choice", "criteria": nil}},
+		{name: "choice with an empty criteria object", value: map[string]any{"type": "choice", "criteria": map[string]any{}}},
 	}
 
 	for _, test := range tests {
@@ -846,9 +845,10 @@ func TestNormalizeQuestionsChoiceCriteriaValidation(t *testing.T) {
 		questionsAssertError(t, err, requiresCriteria)
 	})
 
-	t.Run("typed choice with empty criteria is rejected", func(t *testing.T) {
-		_, err := NormalizeQuestions(Questions{"q": NewChoice(map[string]any{})})
-		questionsAssertError(t, err, `Question "q" requires at least one option in "criteria".`)
+	t.Run("typed choice with empty criteria is sent as given", func(t *testing.T) {
+		normalized, err := NormalizeQuestions(Questions{"q": NewChoice(map[string]any{})})
+		questionsAssertNoError(t, err)
+		questionsAssertEqual(t, "criteria", questionsWire(t, normalized["q"])["criteria"], map[string]any{})
 	})
 
 	t.Run("typed choice with > 255 options is rejected", func(t *testing.T) {

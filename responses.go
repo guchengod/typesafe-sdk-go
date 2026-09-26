@@ -12,23 +12,16 @@ import (
 
 // Usage reports the token counts for a request.
 type Usage struct {
-	// InputTokens is the number of billable input tokens, or nil when the API did not report it.
-	InputTokens *int `json:"input_tokens,omitzero"`
+	// InputTokens is the number of billable input tokens.
+	InputTokens int `json:"input_tokens"`
 
-	// OutputTokens is the number of output tokens, or nil when the API did not report it.
-	OutputTokens *int `json:"output_tokens,omitzero"`
+	// OutputTokens is the number of output tokens.
+	OutputTokens int `json:"output_tokens"`
 }
 
-// String renders the token counts, showing an unreported count as "-".
+// String renders the token counts.
 func (u Usage) String() string {
-	return "Usage{input_tokens: " + optionalInt(u.InputTokens) + ", output_tokens: " + optionalInt(u.OutputTokens) + "}"
-}
-
-func optionalInt(value *int) string {
-	if value == nil {
-		return "-"
-	}
-	return strconv.Itoa(*value)
+	return "Usage{input_tokens: " + strconv.Itoa(u.InputTokens) + ", output_tokens: " + strconv.Itoa(u.OutputTokens) + "}"
 }
 
 // Answer is a single answer to a single question. The concrete type is [NoulAnswer],
@@ -394,16 +387,22 @@ func (d *decoder) decodeModel(target *string) error {
 	return nil
 }
 
-// decodeUsage decodes the required usage object, reporting the exact path of a malformed count.
-// A count that is absent or null stays nil, which is how the API reports "not measured".
+// decodeUsage decodes the required usage object, reporting the exact path of a missing or malformed
+// count. Both counts are required, as the official SDK's types declare them.
 func (d *decoder) decodeUsage(target *Usage) error {
 	var wire struct {
 		InputTokens  *int `json:"input_tokens"`
 		OutputTokens *int `json:"output_tokens"`
 	}
 	if err := json.Unmarshal(d.envelope.Usage, &wire); err == nil && !isJSONNull(d.envelope.Usage) {
-		target.InputTokens = wire.InputTokens
-		target.OutputTokens = wire.OutputTokens
+		switch {
+		case wire.InputTokens == nil:
+			return d.invalid("usage.input_tokens")
+		case wire.OutputTokens == nil:
+			return d.invalid("usage.output_tokens")
+		}
+		target.InputTokens = *wire.InputTokens
+		target.OutputTokens = *wire.OutputTokens
 		return nil
 	}
 	fields, ok := objectEntries(d.envelope.Usage)
@@ -412,16 +411,16 @@ func (d *decoder) decodeUsage(target *Usage) error {
 	}
 	for _, counter := range []struct {
 		name   string
-		target **int
+		target *int
 	}{
 		{"input_tokens", &target.InputTokens},
 		{"output_tokens", &target.OutputTokens},
 	} {
 		value, present := fields[counter.name]
 		if !present {
-			continue
+			return d.invalid("usage." + counter.name)
 		}
-		count, ok := decodeOptionalInt(value)
+		count, ok := decodeCount(value)
 		if !ok {
 			return d.invalid("usage." + counter.name)
 		}
@@ -448,30 +447,30 @@ func objectEntries(raw json.RawMessage) (map[string]json.RawMessage, bool) {
 	return entries, true
 }
 
-// decodeOptionalInt decodes an optional whole number. Null and absence both mean "not reported";
-// a fractional or out-of-range value is rejected.
-func decodeOptionalInt(raw json.RawMessage) (*int, bool) {
+// decodeCount decodes a required whole number, rejecting null, absence, a fractional value, and a
+// value outside the range of an int.
+func decodeCount(raw json.RawMessage) (int, bool) {
 	if isJSONNull(raw) {
-		return nil, true
+		return 0, false
 	}
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) > 0 && ((trimmed[0] >= '0' && trimmed[0] <= '9') || trimmed[0] == '-') {
 		if val, err := strconv.Atoi(string(trimmed)); err == nil {
-			return new(val), true
+			return val, true
 		}
 	}
 	var value int
 	if err := json.Unmarshal(raw, &value); err == nil {
-		return new(value), true
+		return value, true
 	}
 	var number float64
 	if err := json.Unmarshal(raw, &number); err != nil || math.Trunc(number) != number {
-		return nil, false
+		return 0, false
 	}
 	if number > math.MaxInt64 || number < math.MinInt64 {
-		return nil, false
+		return 0, false
 	}
-	return new(int(number)), true
+	return int(number), true
 }
 
 // decodeNumber decodes a required JSON number, rejecting null and every non-numeric value.

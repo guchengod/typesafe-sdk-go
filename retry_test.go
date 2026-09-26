@@ -108,6 +108,7 @@ func TestRetryPolicyValidateRejectsInvalidValues(t *testing.T) {
 		{"negative max retries", func(p *RetryPolicy) { p.MaxRetries = -1 }, "max_retries must be a non-negative integer."},
 		{"negative backoff initial", func(p *RetryPolicy) { p.BackoffInitial = -time.Millisecond }, "backoff_initial must be a non-negative, finite number of seconds."},
 		{"negative backoff max", func(p *RetryPolicy) { p.BackoffMax = -time.Second }, "backoff_max must be a non-negative, finite number of seconds."},
+		{"negative max retry after", func(p *RetryPolicy) { p.MaxRetryAfter = -time.Second }, "max_retry_after must be a non-negative, finite number of seconds."},
 		{"jitter below zero", func(p *RetryPolicy) { p.BackoffJitter = -0.1 }, "backoff_jitter must be between zero and one."},
 		{"jitter above one", func(p *RetryPolicy) { p.BackoffJitter = 1.1 }, "backoff_jitter must be between zero and one."},
 		{"jitter not a number", func(p *RetryPolicy) { p.BackoffJitter = math.NaN() }, "backoff_jitter must be between zero and one."},
@@ -116,6 +117,7 @@ func TestRetryPolicyValidateRejectsInvalidValues(t *testing.T) {
 		{"zero timeout", func(p *RetryPolicy) { p.Timeout = new(time.Duration) }, "timeout must be a positive, finite number of seconds."},
 		{"negative timeout", func(p *RetryPolicy) { p.Timeout = new(-time.Second) }, "timeout must be a positive, finite number of seconds."},
 		{"nil timeout is allowed", func(p *RetryPolicy) { p.Timeout = nil }, ""},
+		{"zero max retry after is allowed", func(p *RetryPolicy) { p.MaxRetryAfter = 0 }, ""},
 		{"zero retries is allowed", func(p *RetryPolicy) { p.MaxRetries = 0 }, ""},
 		{"zero backoff is allowed", func(p *RetryPolicy) { p.BackoffInitial, p.BackoffMax = 0, 0 }, ""},
 		{"boundary jitter values are allowed", func(p *RetryPolicy) { p.BackoffJitter = 1 }, ""},
@@ -172,6 +174,7 @@ func TestRetryPolicyCloneDeepCopies(t *testing.T) {
 	predicate := func(error) bool { return true }
 	sleep := func(context.Context, time.Duration) error { return nil }
 	original := DefaultRetryPolicy()
+	original.Timeout = new(30 * time.Second)
 	original.RetryErrors = []error{sentinel}
 	original.Predicate = predicate
 	original.Sleep = sleep
@@ -183,7 +186,7 @@ func TestRetryPolicyCloneDeepCopies(t *testing.T) {
 	if clone.MaxRetries != original.MaxRetries || clone.BackoffInitial != original.BackoffInitial ||
 		clone.BackoffMax != original.BackoffMax || clone.BackoffJitter != original.BackoffJitter ||
 		clone.RespectRetryAfter != original.RespectRetryAfter || clone.APIConnectionError != original.APIConnectionError ||
-		clone.APITimeoutError != original.APITimeoutError {
+		clone.APITimeoutError != original.APITimeoutError || clone.MaxRetryAfter != original.MaxRetryAfter {
 		t.Errorf("Clone() scalars differ: %+v vs %+v", clone, original)
 	}
 
@@ -199,7 +202,7 @@ func TestRetryPolicyCloneDeepCopies(t *testing.T) {
 		t.Errorf("Clone() shares the Timeout pointer")
 	}
 	*clone.Timeout = time.Second
-	if *original.Timeout != DefaultRetryBudget {
+	if *original.Timeout != 30*time.Second {
 		t.Errorf("mutating the clone changed the original Timeout: %v", *original.Timeout)
 	}
 	if clone.Predicate == nil || !clone.Predicate(errors.New("x")) {
@@ -242,8 +245,11 @@ func TestRetryDefaultPolicyAndStatuses(t *testing.T) {
 		if !policy.RespectRetryAfter || !policy.APIConnectionError || !policy.APITimeoutError {
 			t.Errorf("default policy flags = %+v, want all enabled", policy)
 		}
-		if policy.Timeout == nil || *policy.Timeout != DefaultRetryBudget {
-			t.Errorf("Timeout = %v, want %v", policy.Timeout, DefaultRetryBudget)
+		if policy.MaxRetryAfter != time.Minute {
+			t.Errorf("MaxRetryAfter = %v, want 1m", policy.MaxRetryAfter)
+		}
+		if policy.Timeout != nil {
+			t.Errorf("Timeout = %v, want nil: the default policy applies no overall budget", policy.Timeout)
 		}
 		if policy.Sleep != nil || policy.RandFloat != nil || policy.Predicate != nil || policy.RetryErrors != nil {
 			t.Errorf("default policy seams = %+v, want nil", policy)
@@ -469,14 +475,26 @@ func TestRetryPolicyDelayPrefersServerHint(t *testing.T) {
 		{
 			"seconds hint wins over backoff",
 			true,
-			retryTestRateLimit(errorsTestHeader(HeaderRetryAfter, "61")),
-			61 * time.Second,
+			retryTestRateLimit(errorsTestHeader(HeaderRetryAfter, "45")),
+			45 * time.Second,
 		},
 		{
-			"milliseconds hint",
+			"milliseconds hint at the cap is honored",
+			true,
+			retryTestRateLimit(errorsTestHeader(HeaderRetryAfterMs, "60000")),
+			60 * time.Second,
+		},
+		{
+			"seconds hint beyond the cap falls back to backoff",
+			true,
+			retryTestRateLimit(errorsTestHeader(HeaderRetryAfter, "61")),
+			500 * time.Millisecond,
+		},
+		{
+			"milliseconds hint beyond the cap falls back to backoff",
 			true,
 			retryTestRateLimit(errorsTestHeader(HeaderRetryAfterMs, "60001")),
-			60*time.Second + time.Millisecond,
+			500 * time.Millisecond,
 		},
 		{
 			"milliseconds hint is honored when it is zero",
@@ -527,6 +545,16 @@ func TestRetryPolicyDelayPrefersServerHint(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("a zero cap honors any hint", func(t *testing.T) {
+		t.Parallel()
+		var delays []time.Duration
+		policy := retryTestPolicy(&delays)
+		policy.MaxRetryAfter = 0
+		if got := policy.delay(1, retryTestRateLimit(errorsTestHeader(HeaderRetryAfter, "3600"))); got != time.Hour {
+			t.Errorf("delay(1) = %v, want 1h", got)
+		}
+	})
 }
 
 func TestRetryPolicyDelayFollowsCustomBackoffBounds(t *testing.T) {
@@ -582,12 +610,21 @@ func TestRetryPolicyExecuteHonorsServerDelay(t *testing.T) {
 			wantAttempts: 3,
 		},
 		{
-			name:         "server delay bypasses the backoff cap",
+			name:         "server delay above the backoff cap is honored",
+			respect:      true,
+			headers:      errorsTestHeader(HeaderRetryAfter, "20"),
+			maxRetries:   1,
+			clearTimeout: true,
+			wantDelays:   []time.Duration{20 * time.Second},
+			wantAttempts: 2,
+		},
+		{
+			name:         "server delay beyond MaxRetryAfter uses backoff",
 			respect:      true,
 			headers:      errorsTestHeader(HeaderRetryAfter, "61"),
 			maxRetries:   1,
 			clearTimeout: true,
-			wantDelays:   []time.Duration{61 * time.Second},
+			wantDelays:   []time.Duration{500 * time.Millisecond},
 			wantAttempts: 2,
 		},
 		{

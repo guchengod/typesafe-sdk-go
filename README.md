@@ -13,8 +13,8 @@ instead of free-form text you have to parse.
 - **Standard library only.** `net/http`, `encoding/json`, and `log/slog`. No runtime dependencies.
 - **Concurrency-safe by construction.** A `Client` holds no per-request state and pools
   connections; every call takes a `context.Context`.
-- **Resilient by default.** Jittered exponential backoff with an overall retry budget and
-  `Retry-After` support.
+- **Resilient by default.** Jittered exponential backoff with `Retry-After` support capped at a
+  minute, and an optional overall budget.
 - **Typed everything.** Typed errors you can match with `errors.As`, typed answers, and
   `SystemOneAs[T]` for your own response models.
 - **A CLI when you want one.** `cmd/typesafe` wraps the same client for shell scripts and
@@ -220,7 +220,7 @@ Full guides live in the [**wiki**](https://github.com/guchengod/typesafe-sdk-go/
 | [Responses](https://github.com/guchengod/typesafe-sdk-go/wiki/Responses) | Response accessors and the decoding rules |
 | [Custom Response Models](https://github.com/guchengod/typesafe-sdk-go/wiki/Custom-Response-Models) | Decoding straight into your own struct with `SystemOneAs` |
 | [Configuration](https://github.com/guchengod/typesafe-sdk-go/wiki/Configuration) | Client options, environment variables, per-call options |
-| [Retry Policy](https://github.com/guchengod/typesafe-sdk-go/wiki/Retry-Policy) | Retries, backoff, and the retry budget |
+| [Retry Policy](https://github.com/guchengod/typesafe-sdk-go/wiki/Retry-Policy) | Retries, backoff, retry hints, and the optional budget |
 | [Errors](https://github.com/guchengod/typesafe-sdk-go/wiki/Errors) | The typed error taxonomy and how to match it |
 | [Logging](https://github.com/guchengod/typesafe-sdk-go/wiki/Logging) | Structured logging and credential redaction |
 | [Security](https://github.com/guchengod/typesafe-sdk-go/wiki/Security) | Redaction, protected headers, redirects, bounded reads, TLS |

@@ -12,6 +12,10 @@ import (
 )
 
 // DefaultRetryPolicy returns a fresh copy of the retry policy the SDK uses when none is supplied.
+//
+// The values match the official client SDKs: two retries after the initial attempt, a jittered
+// exponential backoff from 500ms to 5s, retries for 408, 429, and every 5xx and for connection and
+// timeout failures, and server retry hints no longer than a minute. No overall budget is applied.
 func DefaultRetryPolicy() *RetryPolicy {
 	return &RetryPolicy{
 		MaxRetries:         2,
@@ -20,9 +24,9 @@ func DefaultRetryPolicy() *RetryPolicy {
 		BackoffJitter:      0.25,
 		HTTPStatuses:       DefaultRetryStatuses(),
 		RespectRetryAfter:  true,
+		MaxRetryAfter:      60 * time.Second,
 		APIConnectionError: true,
 		APITimeoutError:    true,
-		Timeout:            new(DefaultRetryBudget),
 	}
 }
 
@@ -45,7 +49,7 @@ func DefaultRetryStatuses() map[int]bool {
 //
 //	policy := typesafe.DefaultRetryPolicy()
 //	policy.MaxRetries = 3
-//	policy.Timeout = nil // no overall budget
+//	policy.Timeout = new(30 * time.Second) // bound the whole call
 //
 // A non-nil policy passed to [WithRetryPolicy] or [WithCallRetry] is validated when it is used.
 type RetryPolicy struct {
@@ -69,6 +73,10 @@ type RetryPolicy struct {
 	// RespectRetryAfter honors the retry-after-ms and Retry-After response headers.
 	RespectRetryAfter bool
 
+	// MaxRetryAfter caps how long a server retry hint is honored, matching the official client SDKs:
+	// a longer hint is ignored in favor of the computed backoff. Zero honors any hint.
+	MaxRetryAfter time.Duration
+
 	// APIConnectionError retries [APIConnectionError] failures.
 	APIConnectionError bool
 
@@ -83,9 +91,13 @@ type RetryPolicy struct {
 	// the rules above.
 	Predicate func(error) bool
 
-	// Timeout is the total budget for one SDK call, covering the initial attempt, retries, and
-	// delays. A retry whose delay would reach or exceed the remaining budget is abandoned and the
-	// last error is returned. Nil disables the budget.
+	// Timeout is an optional total budget for one SDK call, covering the initial attempt, retries,
+	// and delays. A retry whose delay would reach or exceed the remaining budget is abandoned and the
+	// last error is returned.
+	//
+	// The official client SDKs bound each attempt and the number of attempts but apply no overall
+	// budget, so the default policy leaves this nil. Set it, for example to new(30*time.Second), when
+	// a call must return within a known time.
 	Timeout *time.Duration
 
 	// Sleep waits between attempts. It is a seam for tests; nil uses a context-aware timer.
@@ -105,6 +117,8 @@ func (p *RetryPolicy) Validate() error {
 		return &SDKError{Message: "backoff_initial must be a non-negative, finite number of seconds."}
 	case p.BackoffMax < 0:
 		return &SDKError{Message: "backoff_max must be a non-negative, finite number of seconds."}
+	case p.MaxRetryAfter < 0:
+		return &SDKError{Message: "max_retry_after must be a non-negative, finite number of seconds."}
 	case !isFinite(p.BackoffJitter) || p.BackoffJitter < 0 || p.BackoffJitter > 1:
 		return &SDKError{Message: "backoff_jitter must be between zero and one."}
 	case p.Timeout != nil && *p.Timeout <= 0:
@@ -190,13 +204,14 @@ func (p *RetryPolicy) backoff(attempt int) time.Duration {
 	return time.Duration(delay * float64(time.Second))
 }
 
-// delay returns the wait before the next attempt: the server's Retry-After hint when one is
-// present and honored, else the computed backoff.
+// delay returns the wait before the next attempt: the server's Retry-After hint when one is present,
+// honored under this policy, and no longer than MaxRetryAfter, else the computed backoff.
 func (p *RetryPolicy) delay(attempt int, lastErr error) time.Duration {
 	if p.RespectRetryAfter {
 		var apiErr *APIError
 		if errors.As(lastErr, &apiErr) {
-			if serverDelay, ok := parseRetryAfter(apiErr.Headers); ok {
+			serverDelay, ok := parseRetryAfter(apiErr.Headers)
+			if ok && (p.MaxRetryAfter <= 0 || serverDelay <= p.MaxRetryAfter) {
 				return serverDelay
 			}
 		}

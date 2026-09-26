@@ -185,14 +185,13 @@ func NewChoice(criteria map[string]any, opts ...QuestionOption) *ChoiceQuestion 
 // QuestionType returns the wire discriminator.
 func (q *ChoiceQuestion) QuestionType() string { return "choice" }
 
-// Validate reports a choice question with no criteria at all, with an empty criteria object, or with
-// more than 255 options.
+// Validate reports a choice question with no criteria field at all, or with more than 255 options.
+//
+// An empty criteria object is sent rather than refused: the request schema requires the field, not a
+// minimum number of entries, and the official client SDKs make no such check.
 func (q *ChoiceQuestion) Validate(name string) error {
 	if q.Criteria == nil {
 		return &SDKError{Message: fmt.Sprintf("Question %q requires \"criteria\".", name)}
-	}
-	if len(q.Criteria) == 0 {
-		return &SDKError{Message: fmt.Sprintf("Question %q requires at least one option in \"criteria\".", name)}
 	}
 	if len(q.Criteria) > 255 {
 		if name != "" {
@@ -292,7 +291,7 @@ func (q RawQuestion) QuestionType() string {
 
 // Validate applies the structural checks the SDK can make without duplicating the server's schema:
 // the type must be a non-empty string, and a choice or score question must carry criteria. A choice
-// question must also declare a countable number of options, between one and 255.
+// question must also declare no more than 255 countable options.
 func (q RawQuestion) Validate(name string) error {
 	questionType, ok := q["type"].(string)
 	if !ok || questionType == "" {
@@ -308,16 +307,11 @@ func (q RawQuestion) Validate(name string) error {
 		return &SDKError{Message: fmt.Sprintf("Question %q requires \"criteria\".", name)}
 	}
 	if questionType == "choice" {
-		if options, ok := choiceOptionCount(criteria); ok {
-			if options == 0 {
-				return &SDKError{Message: fmt.Sprintf("Question %q requires at least one option in \"criteria\".", name)}
+		if options, ok := choiceOptionCount(criteria); ok && options > 255 {
+			if name != "" {
+				return &SDKError{Message: fmt.Sprintf("Choice question %q exceeds maximum of 255 options.", name)}
 			}
-			if options > 255 {
-				if name != "" {
-					return &SDKError{Message: fmt.Sprintf("Choice question %q exceeds maximum of 255 options.", name)}
-				}
-				return &SDKError{Message: "Choice question exceeds maximum of 255 options."}
-			}
+			return &SDKError{Message: "Choice question exceeds maximum of 255 options."}
 		}
 	}
 	if questionType == "score" && isInvalidScoreCriteria(criteria) {

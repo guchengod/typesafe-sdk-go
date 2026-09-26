@@ -149,9 +149,7 @@ Set it to your TypeSafe API key and run the example again:
 
 	fmt.Println("\nticket classification:")
 	fmt.Printf("  model:      %s\n", ticket.Model)
-	if input, output := ticket.Usage.InputTokens, ticket.Usage.OutputTokens; input != nil && output != nil {
-		fmt.Printf("  tokens:     %d in / %d out\n", *input, *output)
-	}
+	fmt.Printf("  tokens:     %d in / %d out\n", ticket.Usage.InputTokens, ticket.Usage.OutputTokens)
 	fmt.Printf("  tone:       %s (confidence %.2f)\n", ticket.Tone.Choice, ticket.Tone.Confidence)
 	fmt.Printf("  urgency:    %.2f of %d (confidence %.2f)\n", ticket.Urgency.Score, len(ticket.Urgency.Legend)-1, ticket.Urgency.Confidence)
 	if ticket.Billing != nil {

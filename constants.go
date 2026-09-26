@@ -33,14 +33,11 @@ const (
 	// DefaultTimeout is the default HTTP timeout for operations.
 	DefaultTimeout = 10 * time.Second
 
-	// DefaultRetryBudget is the default overall retry timeout budget.
-	DefaultRetryBudget = 30 * time.Second
-
 	// SDKName is the name of this SDK.
 	SDKName = "typesafe-sdk-go"
 
 	// SDKVersion is the current version of this SDK.
-	SDKVersion = "0.11.0"
+	SDKVersion = "0.12.0"
 
 	// MaxErrorBodyLength limits the raw error body length included in error messages.
 	MaxErrorBodyLength = 200

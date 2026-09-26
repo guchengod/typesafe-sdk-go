@@ -96,10 +96,10 @@ func TestSystemOneResponseHappyPath(t *testing.T) {
 	if response.Model != "jev-latest" {
 		t.Errorf("Model = %q, want %q", response.Model, "jev-latest")
 	}
-	if response.Usage.InputTokens == nil || *response.Usage.InputTokens != 120 {
+	if response.Usage.InputTokens != 120 {
 		t.Errorf("Usage.InputTokens = %v, want 120", response.Usage.InputTokens)
 	}
-	if response.Usage.OutputTokens == nil || *response.Usage.OutputTokens != 12 {
+	if response.Usage.OutputTokens != 12 {
 		t.Errorf("Usage.OutputTokens = %v, want 12", response.Usage.OutputTokens)
 	}
 	if len(response.Answers) != 3 {
@@ -221,6 +221,47 @@ func TestSystemOneResponseRequiresAnswers(t *testing.T) {
 	}
 }
 
+// TestSystemOneResponseRequiresTokenCounts pins that both usage counts are required, as the official
+// SDK's types declare them.
+func TestSystemOneResponseRequiresTokenCounts(t *testing.T) {
+	t.Parallel()
+	const endpoint = "POST https://api.typesafe.ai/v1/systemone"
+	cases := []struct {
+		name string
+		body string
+		path string
+	}{
+		{
+			name: "absent input count",
+			body: `{"model":"test","usage":{"output_tokens":1},"answers":` + fixedAnswersJSON + `}`,
+			path: "usage.input_tokens",
+		},
+		{
+			name: "null output count",
+			body: `{"model":"test","usage":{"input_tokens":1,"output_tokens":null},"answers":` + fixedAnswersJSON + `}`,
+			path: "usage.output_tokens",
+		},
+		{
+			name: "fractional input count",
+			body: `{"model":"test","usage":{"input_tokens":1.5,"output_tokens":1},"answers":` + fixedAnswersJSON + `}`,
+			path: "usage.input_tokens",
+		},
+		{
+			name: "usage is not an object",
+			body: `{"model":"test","usage":[],"answers":` + fixedAnswersJSON + `}`,
+			path: "usage",
+		},
+	}
+	for _, testCase := range cases {
+		t.Run(testCase.name, func(t *testing.T) {
+			client := responseTestJSONClient(t, testCase.body, "req-123")
+
+			_, err := client.SystemOne(t.Context(), "state", fixedQuestions())
+			responseTestAssertValidationError(t, err, endpoint, testCase.path, "req-123", testCase.body)
+		})
+	}
+}
+
 // responseTestSystemOneCase is one malformed System One payload plus the field path the SDK must
 // report. A case sets either body (a full payload) or answer (a single answers entry injected into
 // a valid envelope).
@@ -235,15 +276,15 @@ func TestSystemOneResponseMalformedPayloads(t *testing.T) {
 	const endpoint = "POST https://api.typesafe.ai/v1/systemone"
 	cases := []responseTestSystemOneCase{
 		{name: "missing model", body: `{"usage":{"input_tokens":1,"output_tokens":1},"answers":{}}`, path: "model"},
-		{name: "non-string model", body: `{"model":1,"usage":{},"answers":{}}`, path: "model"},
+		{name: "non-string model", body: `{"model":1,"usage":{"input_tokens":1,"output_tokens":1},"answers":{}}`, path: "model"},
 		{name: "missing usage", body: `{"model":"test","answers":{}}`, path: "usage"},
 		{name: "non-object usage", body: `{"model":"test","usage":"many","answers":{}}`, path: "usage"},
-		{name: "answers not an object", body: `{"model":"test","usage":{},"answers":[]}`, path: "answers"},
-		{name: "answers is a string", body: `{"model":"test","usage":{},"answers":"nope"}`, path: "answers"},
+		{name: "answers not an object", body: `{"model":"test","usage":{"input_tokens":1,"output_tokens":1},"answers":[]}`, path: "answers"},
+		{name: "answers is a string", body: `{"model":"test","usage":{"input_tokens":1,"output_tokens":1},"answers":"nope"}`, path: "answers"},
 		{name: "null payload", body: `null`, path: ""},
-		{name: "null answers", body: `{"model":"test","usage":{},"answers":null}`, path: "answers"},
+		{name: "null answers", body: `{"model":"test","usage":{"input_tokens":1,"output_tokens":1},"answers":null}`, path: "answers"},
 		{name: "null usage", body: `{"model":"test","usage":null,"answers":{}}`, path: "usage"},
-		{name: "null model", body: `{"model":null,"usage":{},"answers":{}}`, path: "model"},
+		{name: "null model", body: `{"model":null,"usage":{"input_tokens":1,"output_tokens":1},"answers":{}}`, path: "model"},
 
 		{name: "answer not an object", answer: `"n":"not-a-mapping"`, path: "answers.n.type"},
 		{name: "answer is an array", answer: `"n":[{"type":"noul","noul":0.5}]`, path: "answers.n.type"},
@@ -368,9 +409,9 @@ func TestSystemOneResponseRejectsNullEnvelopeFields(t *testing.T) {
 		body string
 		path string
 	}{
-		{"model", `{"model":null,"usage":{},"answers":{}}`, "model"},
+		{"model", `{"model":null,"usage":{"input_tokens":1,"output_tokens":1},"answers":{}}`, "model"},
 		{"usage", `{"model":"test","usage":null,"answers":{}}`, "usage"},
-		{"answers", `{"model":"test","usage":{},"answers":null}`, "answers"},
+		{"answers", `{"model":"test","usage":{"input_tokens":1,"output_tokens":1},"answers":null}`, "answers"},
 		{"whole payload", `null`, ""},
 		{"blank payload", ` `, ""},
 	} {
@@ -460,8 +501,7 @@ func TestSystemOneResponseToleratesUnknownFields(t *testing.T) {
 	if answer := response.Nouls()["spam"]; answer == nil || answer.Noul != 0.9 {
 		t.Errorf("Nouls()[spam] = %+v, want noul 0.9", answer)
 	}
-	if response.Usage.InputTokens == nil || *response.Usage.InputTokens != 1 ||
-		response.Usage.OutputTokens == nil || *response.Usage.OutputTokens != 1 {
+	if response.Usage.InputTokens != 1 || response.Usage.OutputTokens != 1 {
 		t.Errorf("Usage = %+v, want 1 input and 1 output token", response.Usage)
 	}
 	encoded, err := json.Marshal(response.Usage)
@@ -913,7 +953,7 @@ func TestSystemOneAsLiftsAnswersOntoCustomStruct(t *testing.T) {
 	if result.Model != "jev-latest" {
 		t.Errorf("Model = %q, want %q", result.Model, "jev-latest")
 	}
-	if result.Usage.InputTokens == nil || *result.Usage.InputTokens != 120 {
+	if result.Usage.InputTokens != 120 {
 		t.Errorf("Usage.InputTokens = %v, want 120", result.Usage.InputTokens)
 	}
 	if result.Billing.Type != "noul" || result.Billing.Noul != 0.98 {
@@ -991,7 +1031,7 @@ func TestSystemOneAsMissingRequiredField(t *testing.T) {
 	})
 
 	t.Run("null value for non-nullable required field", func(t *testing.T) {
-		const nullBody = `{"model":"test","usage":{"input_tokens":1},"answers":` + fixedAnswersJSON + `,"required":null}`
+		const nullBody = `{"model":"test","usage":{"input_tokens":1,"output_tokens":1},"answers":` + fixedAnswersJSON + `,"required":null}`
 		nullClient := responseTestJSONClient(t, nullBody, "req-null")
 		_, err := SystemOneAs[responseTestRequired](t.Context(), nullClient, "state", fixedQuestions())
 		responseTestAssertValidationError(t, err, "POST https://api.typesafe.ai/v1/systemone", "required", "req-null", nullBody)

@@ -120,8 +120,8 @@ func TestIntegrationSystemOne(t *testing.T) {
 	if response.Model == "" {
 		t.Error("response.Model is empty")
 	}
-	if response.Usage.InputTokens != nil && *response.Usage.InputTokens <= 0 {
-		t.Errorf("Usage.InputTokens = %d, want > 0", *response.Usage.InputTokens)
+	if response.Usage.InputTokens <= 0 {
+		t.Errorf("Usage.InputTokens = %d, want > 0", response.Usage.InputTokens)
 	}
 
 	billing, ok := response.Nouls()["billing"]

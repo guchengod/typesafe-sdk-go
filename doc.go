@@ -103,11 +103,14 @@
 //
 // 5. What the SDK Validates:
 // Questions are checked locally for the shape the request schema requires: a question type, criteria
-// for a choice or a score question, at least one and at most 255 options for a choice, and between 2
-// and 10 levels for a score. Fields the schema makes optional — instructions above all — are sent
-// only when the caller sets them; the HTTP reference page marks instructions required, but the
-// request schema requires only criteria, for choice and score, so the SDK lets the API judge a
-// question that omits them.
+// for a choice or a score question, at most 255 options for a choice, and between 2 and 10 levels for
+// a score. Fields the schema makes optional — instructions above all — are sent only when the caller
+// sets them; the HTTP reference page marks instructions required, but the request schema requires
+// only criteria, for choice and score, so the SDK lets the API judge a question that omits them.
+//
+// A success response is held to the same standard: the model, the usage with both token counts, and
+// one answer per question must be present, or the SDK reports an [APIResponseValidationError] naming
+// the missing field.
 //
 // # Errors
 //
@@ -134,8 +137,9 @@
 //
 //   - Functional options: [Option] configures a [Client], [RequestOption] a single call, and
 //     [QuestionOption] a single question.
-//   - Resilient retries: jittered exponential backoff with an overall budget, honoring the
-//     retry-after-ms and Retry-After headers. See [RetryPolicy] and [DefaultRetryPolicy].
+//   - Resilient retries: jittered exponential backoff, honoring the retry-after-ms and Retry-After
+//     headers for up to a minute, with an optional overall budget. See [RetryPolicy] and
+//     [DefaultRetryPolicy].
 //   - Security by design: credential headers are redacted from logs ([NewRedactingHandler]
 //     extends that to your own records), credentials in URLs are stripped from error endpoints,
 //     response bodies are bounded to 16 MB, and the SDK's transport refuses TLS below 1.2.

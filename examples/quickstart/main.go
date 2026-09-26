@@ -79,9 +79,7 @@ func run() error {
 	}
 
 	fmt.Printf("model: %s\n", response.Model)
-	if input, output := response.Usage.InputTokens, response.Usage.OutputTokens; input != nil && output != nil {
-		fmt.Printf("tokens: %d in / %d out\n", *input, *output)
-	}
+	fmt.Printf("tokens: %d in / %d out\n", response.Usage.InputTokens, response.Usage.OutputTokens)
 	fmt.Printf("request id: %s\n", response.RawRequestID())
 
 	// Answers are grouped by kind and keyed by the question name used in the request. Every
