@@ -125,14 +125,6 @@ func newMockClient(t *testing.T, handler func(req *http.Request, attempt int) *h
 	return client, transport
 }
 
-// newJSONClient returns a client that answers every request with the same JSON body.
-func newJSONClient(t *testing.T, status int, body string, opts ...Option) (*Client, *mockTransport) {
-	t.Helper()
-	return newMockClient(t, func(*http.Request, int) *http.Response {
-		return JSONResponse(status, body)
-	}, opts...)
-}
-
 // noRetryPolicy disables retries so a test observes exactly one attempt unless it asks otherwise.
 func noRetryPolicy() *RetryPolicy {
 	policy := DefaultRetryPolicy()

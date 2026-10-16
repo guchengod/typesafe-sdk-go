@@ -276,7 +276,7 @@ func (e *ScoreError) Error() string {
 }
 
 func (e *ScoreError) isTypeSafeError() {}
- 
+
 // BoxQuestion locates what its instructions describe in an image.
 //
 // Box questions find where something is in an image and return bounding box coordinates
