@@ -2,8 +2,12 @@ package typesafe
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"errors"
+	"image"
+	"image/color"
+	"image/png"
 	"os"
 	"path/filepath"
 	"strings"
@@ -282,6 +286,143 @@ func TestIntegrationContextCancellation(t *testing.T) {
 	if elapsed := time.Since(started); elapsed > 5*time.Second {
 		t.Errorf("cancelled call took %v, want a prompt return", elapsed)
 	}
+}
+
+// TestIntegrationCompression exercises request gzip compression with bodies >= 1 KiB against the live API.
+func TestIntegrationCompression(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	client := liveClient(t)
+
+	largeText := strings.Repeat("This is a customer report regarding recurring billing and performance issues on our database. ", 20)
+	resp, err := client.SystemOne(
+		t.Context(),
+		map[string]any{"report": largeText},
+		Questions{
+			"billing": NewNoul("Does this report mention billing issues?"),
+		},
+		WithCallCompression(true),
+	)
+	if err != nil {
+		t.Fatalf("SystemOne with compression error = %v", err)
+	}
+	if resp.Model == "" {
+		t.Error("Model is empty")
+	}
+	billing, ok := resp.Nouls()["billing"]
+	if !ok || billing.Noul < 0.5 {
+		t.Errorf("billing = %+v, want noul >= 0.5", billing)
+	}
+}
+
+// TestIntegrationMultimodalAndBox exercises Image asset embedding and Box question evaluation against the live API.
+func TestIntegrationMultimodalAndBox(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	client := liveClient(t)
+
+	// Create a test 512x512 image with a blue rectangle in the center
+	imgData := createTestPNG(512, 512)
+	img, err := NewImage(imgData, "png")
+	if err != nil {
+		t.Fatalf("NewImage() error = %v", err)
+	}
+
+	resp, err := client.SystemOne(
+		t.Context(),
+		map[string]any{
+			"photo": img,
+			"desc":  "A test canvas with a colored shape",
+		},
+		Questions{
+			"has_shape": NewNoul("Is there a colored shape in the image?"),
+			"shape_box": NewBox("the colored shape in photo"),
+		},
+		WithModel(ModelJevPreview),
+		WithCallImages(true),
+	)
+	if err != nil {
+		t.Fatalf("SystemOne with Box/Image error = %v", err)
+	}
+	if resp.Model == "" {
+		t.Error("Model is empty")
+	}
+	hasShape, ok := resp.Nouls()["has_shape"]
+	if !ok || hasShape.Noul < 0.5 {
+		t.Errorf("has_shape = %+v, want noul >= 0.5", hasShape)
+	}
+	shapeBox, ok := resp.Boxes()["shape_box"]
+	if !ok {
+		t.Fatal("no box answer named shape_box")
+	}
+	if shapeBox.Box.Top < 0 || shapeBox.Box.Bottom > 1 || shapeBox.Box.Left < 0 || shapeBox.Box.Right > 1 {
+		t.Errorf("shapeBox.Box out of bounds: %+v", shapeBox.Box)
+	}
+}
+
+// TestIntegrationLongContext exercises the Danger Zone long-context header against the live API.
+func TestIntegrationLongContext(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	client := liveClient(t)
+
+	resp, err := client.SystemOne(
+		t.Context(),
+		map[string]any{"content": "Short test with long-context header enabled."},
+		Questions{"q": NewNoul("Is this a test?")},
+		WithCallLongContext(true),
+	)
+	if err != nil {
+		t.Fatalf("SystemOne with long context header error = %v", err)
+	}
+	if resp.Model == "" {
+		t.Error("Model is empty")
+	}
+}
+
+// TestIntegrationInvalidModel checks that requesting an unknown model returns a typed APIError from the server.
+func TestIntegrationInvalidModel(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	client := liveClient(t)
+
+	_, err := client.SystemOne(
+		t.Context(),
+		"hello",
+		Questions{"q": NewNoul("Is this hello?")},
+		WithModel("non-existent-model-xyz-999"),
+	)
+	if err == nil {
+		t.Fatal("expected error for non-existent model, got nil")
+	}
+	apiErr, ok := AsAPIError(err)
+	if !ok {
+		t.Fatalf("error %v is not an APIError", err)
+	}
+	if apiErr.Status != 400 {
+		t.Errorf("Status = %d, want 400", apiErr.Status)
+	}
+}
+
+func createTestPNG(w, h int) []byte {
+	img := image.NewRGBA(image.Rect(0, 0, w, h))
+	for y := 0; y < h; y++ {
+		for x := 0; x < w; x++ {
+			img.Set(x, y, color.White)
+		}
+	}
+	for y := 50; y < 150; y++ {
+		for x := 50; x < 150; x++ {
+			img.Set(x, y, color.RGBA{R: 0, G: 0, B: 255, A: 255})
+		}
+	}
+	var buf bytes.Buffer
+	_ = png.Encode(&buf, img)
+	return buf.Bytes()
 }
 
 func contains(values []string, target string) bool {
