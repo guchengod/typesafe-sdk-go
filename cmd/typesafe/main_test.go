@@ -551,3 +551,58 @@ func TestMissingAPIKeyIsAUsageError(t *testing.T) {
 		t.Errorf("stderr = %q, want the missing-key message", stderr.String())
 	}
 }
+
+func TestAskBoxAndDangerZoneFlags(t *testing.T) {
+	boxAnswerPayload := `{
+		"model": "jev-preview",
+		"usage": {"input_tokens": 15, "output_tokens": 4},
+		"answers": {
+			"mug": {
+				"type": "box",
+				"box": {"top": 0.1, "bottom": 0.8, "left": 0.2, "right": 0.7},
+				"confidence": 0.95
+			}
+		}
+	}`
+	api := newCLIAPI(t, respondJSON(boxAnswerPayload, http.StatusOK))
+
+	result := runCLI(t, api, "", "ask",
+		"--state", "a kitchen table",
+		"--box", "mug=the coffee mug in photo",
+		"--long-context",
+		"--images",
+		"--format", "text",
+	)
+
+	if result.code != exitOK {
+		t.Fatalf("exit code = %d, stderr = %q", result.code, result.stderr)
+	}
+
+	if len(api.requests) != 1 {
+		t.Fatalf("recorded %d requests, want 1", len(api.requests))
+	}
+	req := api.requests[0]
+	questions, ok := req["questions"].(map[string]any)
+	if !ok {
+		t.Fatalf("questions = %v, want a map", req["questions"])
+	}
+	mug, ok := questions["mug"].(map[string]any)
+	if !ok {
+		t.Fatalf("mug question = %v, want a map", questions["mug"])
+	}
+	if mug["type"] != "box" || mug["instructions"] != "the coffee mug in photo" {
+		t.Errorf("mug question = %v, want type box with instruction", mug)
+	}
+
+	headers := api.headers[0]
+	if headers.Get("TypeSafe-Danger-Zone-Long-Context") != "true" {
+		t.Errorf("missing TypeSafe-Danger-Zone-Long-Context header")
+	}
+	if headers.Get("TypeSafe-Danger-Zone-Images") != "true" {
+		t.Errorf("missing TypeSafe-Danger-Zone-Images header")
+	}
+
+	if !strings.Contains(result.stdout, "box [0.10, 0.80, 0.20, 0.70] (confidence 0.95)") {
+		t.Errorf("stdout = %q, want formatted box answer", result.stdout)
+	}
+}

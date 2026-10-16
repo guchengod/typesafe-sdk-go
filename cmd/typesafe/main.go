@@ -119,6 +119,9 @@ ask flags:
   --noul value         Repeatable: name=instruction
   --choice value       Repeatable: name=label[:description],label[:description],...
   --score value        Repeatable: name=level,level,level
+  --box value          Repeatable: name=instruction
+  --long-context       Enable long context (262k)
+  --images             Enable danger zone images
   --format string      Output format: json or text (default json)
 
 models flags:
@@ -297,7 +300,7 @@ func runModels(ctx context.Context, args []string, stdout, stderr io.Writer, inh
 
 func runAsk(ctx context.Context, args []string, stdout, stderr io.Writer, stdin io.Reader, inherited connectionFlags) int {
 	var own connectionFlags
-	var nouls, choices, scores stringList
+	var nouls, choices, scores, boxes stringList
 
 	fs := flag.NewFlagSet("ask", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -307,9 +310,12 @@ func runAsk(ctx context.Context, args []string, stdout, stderr io.Writer, stdin 
 	model := fs.String("model", "", "model to use (default $TYPESAFE_DEFAULT_MODEL)")
 	questions := fs.String("questions", "", "named questions as JSON: inline, @file, or -")
 	format := fs.String("format", "json", "output format: json or text")
+	longContext := fs.Bool("long-context", false, "enable long context (262k)")
+	images := fs.Bool("images", false, "enable danger zone images")
 	fs.Var(&nouls, "noul", "repeatable: name=instruction")
 	fs.Var(&choices, "choice", "repeatable: name=label[:description],...")
 	fs.Var(&scores, "score", "repeatable: name=level,level,level")
+	fs.Var(&boxes, "box", "repeatable: name=instruction")
 
 	switch err := fs.Parse(args); {
 	case errors.Is(err, flag.ErrHelp):
@@ -337,7 +343,7 @@ func runAsk(ctx context.Context, args []string, stdout, stderr io.Writer, stdin 
 	}
 	parsedState := parseState(stateValue)
 
-	named, err := buildQuestions(*questions, stdin, nouls, choices, scores)
+	named, err := buildQuestions(*questions, stdin, nouls, choices, scores, boxes)
 	if err != nil {
 		return fail(stderr, exitUsage, err)
 	}
@@ -351,6 +357,12 @@ func runAsk(ctx context.Context, args []string, stdout, stderr io.Writer, stdin 
 	var options []typesafe.RequestOption
 	if *model != "" {
 		options = append(options, typesafe.WithModel(*model))
+	}
+	if *longContext {
+		options = append(options, typesafe.WithCallLongContext(true))
+	}
+	if *images {
+		options = append(options, typesafe.WithCallImages(true))
 	}
 
 	response, err := client.SystemOne(ctx, parsedState, named, options...)
@@ -366,7 +378,7 @@ func runAsk(ctx context.Context, args []string, stdout, stderr io.Writer, stdin 
 
 // buildQuestions assembles the question map from the JSON input and the
 // convenience flags. Names must be unique across both.
-func buildQuestions(source string, stdin io.Reader, nouls, choices, scores stringList) (map[string]any, error) {
+func buildQuestions(source string, stdin io.Reader, nouls, choices, scores, boxes stringList) (map[string]any, error) {
 	named := map[string]any{}
 
 	if source != "" {
@@ -443,8 +455,21 @@ func buildQuestions(source string, stdin io.Reader, nouls, choices, scores strin
 		}
 	}
 
+	for _, spec := range boxes {
+		name, instruction, err := splitSpec(spec)
+		if err != nil {
+			return nil, err
+		}
+		if strings.TrimSpace(instruction) == "" {
+			return nil, fmt.Errorf("--box %s needs an instruction, as name=instruction", name)
+		}
+		if err := add(name, typesafe.NewBox(instruction)); err != nil {
+			return nil, err
+		}
+	}
+
 	if len(named) == 0 {
-		return nil, errors.New("at least one question is required; use --questions, --noul, --choice, or --score")
+		return nil, errors.New("at least one question is required; use --questions, --noul, --choice, --score, or --box")
 	}
 	return named, nil
 }
@@ -562,6 +587,14 @@ func writeAnswers(stdout, stderr io.Writer, response *typesafe.SystemOneResponse
 		case *typesafe.ScoreAnswer:
 			writef(writer, "%s\tscore %.2f of %d (confidence %.2f)\n",
 				name, answer.Score, len(answer.Legend)-1, answer.Confidence)
+		case *typesafe.BoxAnswer:
+			if answer.Confidence != nil {
+				writef(writer, "%s\tbox [%.2f, %.2f, %.2f, %.2f] (confidence %.2f)\n",
+					name, answer.Box.Top, answer.Box.Bottom, answer.Box.Left, answer.Box.Right, *answer.Confidence)
+			} else {
+				writef(writer, "%s\tbox [%.2f, %.2f, %.2f, %.2f]\n",
+					name, answer.Box.Top, answer.Box.Bottom, answer.Box.Left, answer.Box.Right)
+			}
 		}
 	}
 	if err := writer.Flush(); err != nil {

@@ -2,10 +2,12 @@ package typesafe
 
 import (
 	"bytes"
+	"compress/gzip"
 	"context"
 	"crypto/tls"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net"
@@ -44,6 +46,9 @@ type request struct {
 	timeout     time.Duration
 	headers     map[string]string
 	retryPolicy *RetryPolicy
+	compression *bool
+	longContext *bool
+	images      *bool
 }
 
 // response is a successful HTTP response together with the metadata the SDK surfaces on its
@@ -73,15 +78,36 @@ func execute(ctx context.Context, config *Config, httpClient *http.Client, req r
 	endpoint := cleanEndpoint(req.method, targetURL)
 
 	var body []byte
+	var logBody []byte
+	var isCompressed bool
 	if req.body != nil {
 		encoded, err := json.Marshal(req.body)
 		if err != nil {
 			return nil, &SDKError{Message: "The request body could not be encoded as JSON", Cause: err}
 		}
-		body = encoded
+		if len(encoded) > MaxRequestBodyLimit {
+			return nil, &SDKError{
+				Message: fmt.Sprintf("The request body exceeded the %d-byte limit.", MaxRequestBodyLimit),
+			}
+		}
+		logBody = encoded
+		shouldCompress := config.Compression
+		if req.compression != nil {
+			shouldCompress = *req.compression
+		}
+		if shouldCompress && len(encoded) >= MinCompressionBytes {
+			compressed, err := compressGzip(encoded)
+			if err != nil {
+				return nil, &SDKError{Message: "Failed to compress request body", Cause: err}
+			}
+			body = compressed
+			isCompressed = true
+		} else {
+			body = encoded
+		}
 	}
 
-	header := buildHeaders(config, req, body != nil)
+	header := buildHeaders(config, req, body != nil, isCompressed)
 	logger := config.Logger
 
 	var result *response
@@ -105,7 +131,7 @@ func execute(ctx context.Context, config *Config, httpClient *http.Client, req r
 					slog.String("method", req.method), slog.String("url", targetURL), slog.Int("attempt", attempt))
 			}
 		}
-		logRequest(attemptCtx, logger, req.method, targetURL, httpReq.Header, body)
+		logRequest(attemptCtx, logger, req.method, targetURL, httpReq.Header, logBody)
 
 		started := time.Now()
 		httpResp, err := httpClient.Do(httpReq)
@@ -159,8 +185,8 @@ func execute(ctx context.Context, config *Config, httpClient *http.Client, req r
 // buildHeaders merges the client's default headers with the per-call headers and then applies the
 // SDK's own headers. Client identification and credentials are applied last, so a caller can
 // never displace them, whatever the case they spell a header name in.
-func buildHeaders(config *Config, req request, hasBody bool) http.Header {
-	header := make(http.Header, len(config.DefaultHeaders)+len(req.headers)+5)
+func buildHeaders(config *Config, req request, hasBody, isCompressed bool) http.Header {
+	header := make(http.Header, len(config.DefaultHeaders)+len(req.headers)+7)
 	for name, values := range config.DefaultHeaders {
 		for _, value := range values {
 			header.Add(name, value)
@@ -168,6 +194,20 @@ func buildHeaders(config *Config, req request, hasBody bool) http.Header {
 	}
 	for name, value := range req.headers {
 		header.Set(name, value)
+	}
+	if req.longContext != nil {
+		if *req.longContext {
+			header.Set(HeaderDangerZoneLongContext, "true")
+		} else {
+			header.Del(HeaderDangerZoneLongContext)
+		}
+	}
+	if req.images != nil {
+		if *req.images {
+			header.Set(HeaderDangerZoneImages, "true")
+		} else {
+			header.Del(HeaderDangerZoneImages)
+		}
 	}
 	// A caller-supplied retry count would misreport the attempt number to the server.
 	header.Del(HeaderRetryCount)
@@ -179,7 +219,23 @@ func buildHeaders(config *Config, req request, hasBody bool) http.Header {
 	if hasBody {
 		header.Set(HeaderContentType, ContentTypeJSON)
 	}
+	if isCompressed {
+		header.Set(HeaderContentEncoding, EncodingGzip)
+	}
 	return header
+}
+
+// compressGzip compresses data with standard gzip.
+func compressGzip(data []byte) ([]byte, error) {
+	var buf bytes.Buffer
+	zw := gzip.NewWriter(&buf)
+	if _, err := zw.Write(data); err != nil {
+		return nil, err
+	}
+	if err := zw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
 }
 
 // closeBody releases a response body, discarding the error: the SDK has already read the payload,

@@ -30,6 +30,18 @@ const (
 	// DefaultModel is the default model name.
 	DefaultModel = "jev-latest"
 
+	// ModelJevLatest is the alias for the latest stable model release (currently jev-1.13.0).
+	ModelJevLatest = "jev-latest"
+
+	// ModelJevPreview is the alias for the latest preview release (currently jev-1.14.0).
+	ModelJevPreview = "jev-preview"
+
+	// ModelJev114 is the versioned ID for Jev 1.14.
+	ModelJev114 = "jev-1.14.0"
+
+	// ModelJev113 is the versioned ID for Jev 1.13.
+	ModelJev113 = "jev-1.13.0"
+
 	// DefaultTimeout is the default HTTP timeout for operations.
 	DefaultTimeout = 10 * time.Second
 
@@ -37,13 +49,22 @@ const (
 	SDKName = "typesafe-sdk-go"
 
 	// SDKVersion is the current version of this SDK.
-	SDKVersion = "0.12.0"
+	SDKVersion = "0.13.0"
 
 	// MaxErrorBodyLength limits the raw error body length included in error messages.
 	MaxErrorBodyLength = 200
 
-	// MaxResponseBodyLimit limits the maximum response body read (16 MB) to prevent OOM DOS attacks.
-	MaxResponseBodyLimit = 16 * 1024 * 1024
+	// MaxRequestBodyLimit is the maximum request body size (32 MiB) accepted by the API.
+	MaxRequestBodyLimit = 32 * 1024 * 1024
+
+	// MaxResponseBodyLimit limits the maximum response body read (32 MiB) matching API spec.
+	MaxResponseBodyLimit = 32 * 1024 * 1024
+
+	// MaxImageSizeLimit is the maximum size (16 MiB) for an individual image file.
+	MaxImageSizeLimit = 16 * 1024 * 1024
+
+	// MinCompressionBytes is the minimum request body size (1 KiB) for automatic compression.
+	MinCompressionBytes = 1024
 )
 
 // API Endpoint paths.
@@ -56,6 +77,12 @@ const (
 const (
 	// StatusOverloaded is the HTTP 529 status code returned when TypeSafe is temporarily overloaded.
 	StatusOverloaded = 529
+
+	// StatusPayloadTooLarge is HTTP 413 Payload Too Large.
+	StatusPayloadTooLarge = 413
+
+	// StatusUnsupportedMediaType is HTTP 415 Unsupported Media Type.
+	StatusUnsupportedMediaType = 415
 )
 
 // Protocol headers.
@@ -71,6 +98,15 @@ const (
 	HeaderRetryAfter    = "retry-after"
 	HeaderRetryAfterMs  = "retry-after-ms"
 	ContentTypeJSON     = "application/json"
+
+	// Danger Zone feature headers.
+	HeaderDangerZoneImages      = "TypeSafe-Danger-Zone-Images"
+	HeaderDangerZoneLongContext = "TypeSafe-Danger-Zone-Long-Context"
+
+	// Compression headers.
+	HeaderContentEncoding = "Content-Encoding"
+	EncodingGzip          = "gzip"
+	EncodingZstd          = "zstd"
 )
 
 // RuntimeString returns the runtime environment string for SDK identification, sent in the

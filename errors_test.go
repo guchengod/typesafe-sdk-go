@@ -37,6 +37,8 @@ func TestErrorStatusMappingToType(t *testing.T) {
 		{http.StatusForbidden, (*PermissionDeniedError)(nil)},
 		{http.StatusNotFound, (*NotFoundError)(nil)},
 		{http.StatusUnprocessableEntity, (*UnprocessableEntityError)(nil)},
+		{StatusPayloadTooLarge, (*PayloadTooLargeError)(nil)},
+		{StatusUnsupportedMediaType, (*UnsupportedMediaTypeError)(nil)},
 		{http.StatusTooManyRequests, (*RateLimitError)(nil)},
 		{StatusOverloaded, (*OverloadedError)(nil)},
 		{http.StatusInternalServerError, (*InternalServerError)(nil)},
@@ -900,5 +902,37 @@ func TestOverloadedError(t *testing.T) {
 	}
 	if wait, hasWait := rateLimit.RetryAfter(); !hasWait || wait != 350*time.Millisecond {
 		t.Errorf("rateLimit.RetryAfter() = (%v, %v), want (350ms, true)", wait, hasWait)
+	}
+}
+
+func TestPayloadTooLargeAndUnsupportedMediaTypeExtractors(t *testing.T) {
+	t.Parallel()
+
+	raw := []byte(`{"message":"Payload over 32 MiB"}`)
+	err413 := newAPIError(StatusPayloadTooLarge, decodeErrorBody(raw), raw,
+		errorsTestHeader(HeaderRequestID, "req-413"), "POST https://api.typesafe.ai/v1/systemone")
+
+	if ptl, ok := AsPayloadTooLargeError(err413); !ok || ptl == nil {
+		t.Fatalf("AsPayloadTooLargeError(%v) failed", err413)
+	} else if ptl.Status != StatusPayloadTooLarge {
+		t.Errorf("ptl.Status = %d, want %d", ptl.Status, StatusPayloadTooLarge)
+	}
+
+	if _, ok := AsUnsupportedMediaTypeError(err413); ok {
+		t.Errorf("AsUnsupportedMediaTypeError(err413) = true, want false")
+	}
+
+	raw415 := []byte(`{"message":"Unsupported Content-Encoding"}`)
+	err415 := newAPIError(StatusUnsupportedMediaType, decodeErrorBody(raw415), raw415,
+		errorsTestHeader(HeaderRequestID, "req-415"), "POST https://api.typesafe.ai/v1/systemone")
+
+	if umt, ok := AsUnsupportedMediaTypeError(err415); !ok || umt == nil {
+		t.Fatalf("AsUnsupportedMediaTypeError(%v) failed", err415)
+	} else if umt.Status != StatusUnsupportedMediaType {
+		t.Errorf("umt.Status = %d, want %d", umt.Status, StatusUnsupportedMediaType)
+	}
+
+	if _, ok := AsPayloadTooLargeError(err415); ok {
+		t.Errorf("AsPayloadTooLargeError(err415) = true, want false")
 	}
 }

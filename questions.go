@@ -8,9 +8,9 @@ import (
 )
 
 // Question is implemented by every question the SDK can send: [NoulQuestion], [ChoiceQuestion],
-// [ScoreQuestion], and [RawQuestion].
+// [ScoreQuestion], [BoxQuestion], and [RawQuestion].
 type Question interface {
-	// QuestionType returns the wire discriminator: "noul", "choice", or "score".
+	// QuestionType returns the wire discriminator: "noul", "choice", "score", or "box".
 	QuestionType() string
 
 	// Validate reports whether the question is well formed under the given name.
@@ -21,7 +21,7 @@ type Question interface {
 // the response.
 //
 // The values are typed as [Question], so a value that is not a question is a compile error. Build
-// them with [NewNoul], [NewChoice], and [NewScore], or with [RawQuestion] for a question shape this
+// them with [NewNoul], [NewChoice], [NewScore], and [NewBox], or with [RawQuestion] for a question shape this
 // version does not model. To pass a plain map[string]any, hand it to the client directly — the
 // question parameter accepts any accepted container, which [NormalizeQuestions] validates.
 type Questions map[string]Question
@@ -276,6 +276,47 @@ func (e *ScoreError) Error() string {
 }
 
 func (e *ScoreError) isTypeSafeError() {}
+ 
+// BoxQuestion locates what its instructions describe in an image.
+//
+// Box questions find where something is in an image and return bounding box coordinates
+// as fractions of the image's width and height.
+// Requires the TypeSafe-Danger-Zone-Images: true header and the jev-preview / jev-1.14.0 model.
+//
+// See the box primitive (https://docs.typesafe.ai/primitives/box) for details.
+type BoxQuestion struct {
+	// Type is always "box".
+	Type string `json:"type"`
+
+	// Instructions is what to locate, expressed as a string, a JSON object, or an array.
+	Instructions any `json:"instructions,omitzero"`
+
+	extra map[string]any
+}
+
+// NewBox creates a box question to locate a subject in an image.
+//
+//	typesafe.NewBox("the coffee mug in photo")
+func NewBox(instructions any, opts ...QuestionOption) *BoxQuestion {
+	options := resolveQuestionOptions(opts)
+	return &BoxQuestion{
+		Type:         "box",
+		Instructions: resolveInstructions(instructions, options),
+		extra:        options.extra,
+	}
+}
+
+// QuestionType returns the wire discriminator.
+func (q *BoxQuestion) QuestionType() string { return "box" }
+
+// Validate accepts every box question (box questions take no criteria).
+func (q *BoxQuestion) Validate(string) error { return nil }
+
+// MarshalJSON encodes the question, including any fields added by [WithQuestionField].
+func (q *BoxQuestion) MarshalJSON() ([]byte, error) {
+	type wire BoxQuestion
+	return marshalWithExtra(wire(*q), q.extra)
+}
 
 // RawQuestion is a question sent as a plain map, for request fields this SDK version does not
 // model:
@@ -401,6 +442,8 @@ func questionEntries(questions any) (map[string]any, error) {
 	case map[string]*ChoiceQuestion:
 		return toStringKeyedMap(typed), nil
 	case map[string]*ScoreQuestion:
+		return toStringKeyedMap(typed), nil
+	case map[string]*BoxQuestion:
 		return toStringKeyedMap(typed), nil
 	default:
 		return nil, &SDKError{

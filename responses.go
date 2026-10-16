@@ -25,9 +25,9 @@ func (u Usage) String() string {
 }
 
 // Answer is a single answer to a single question. The concrete type is [NoulAnswer],
-// [ChoiceAnswer], or [ScoreAnswer], and always matches the corresponding question's type.
+// [ChoiceAnswer], [ScoreAnswer], or [BoxAnswer], and always matches the corresponding question's type.
 type Answer interface {
-	// AnswerType returns the wire discriminator: "noul", "choice", or "score".
+	// AnswerType returns the wire discriminator: "noul", "choice", "score", or "box".
 	AnswerType() string
 }
 
@@ -138,6 +138,40 @@ func stringifyKeys[V any](source map[int]V) map[string]V {
 	return target
 }
 
+// BoxCoordinates holds a bounding box's edges as fractions of an image's height
+// (top, bottom) and width (left, right).
+type BoxCoordinates struct {
+	// Top is the top edge, as a fraction of image height from the top (0 to 1).
+	Top float64 `json:"top"`
+
+	// Bottom is the bottom edge, as a fraction of image height from the top (0 to 1).
+	Bottom float64 `json:"bottom"`
+
+	// Left is the left edge, as a fraction of image width from the left (0 to 1).
+	Left float64 `json:"left"`
+
+	// Right is the right edge, as a fraction of image width from the left (0 to 1).
+	Right float64 `json:"right"`
+}
+
+// BoxAnswer is a bounding box locating an object or subject in an image.
+//
+// See the box primitive (https://docs.typesafe.ai/primitives/box) for details.
+type BoxAnswer struct {
+	// Type is always "box".
+	Type string `json:"type"`
+
+	// Box holds the bounding box edges as fractions from 0 to 1.
+	Box BoxCoordinates `json:"box"`
+
+	// Confidence is the statistical certainty of the box from 0 to 1, or nil when the API
+	// did not report one.
+	Confidence *float64 `json:"confidence"`
+}
+
+// AnswerType returns the wire discriminator.
+func (a *BoxAnswer) AnswerType() string { return "box" }
+
 // SystemOneResponse holds the answers to a System One request, grouped by question kind.
 //
 // See System One (https://docs.typesafe.ai/concepts/system-one) for details.
@@ -156,6 +190,7 @@ type SystemOneResponse struct {
 	nouls   map[string]*NoulAnswer
 	choices map[string]*ChoiceAnswer
 	scores  map[string]*ScoreAnswer
+	boxes   map[string]*BoxAnswer
 
 	requestID   string
 	rawResponse *http.Response
@@ -170,6 +205,9 @@ func (r *SystemOneResponse) Choices() map[string]*ChoiceAnswer { return r.choice
 
 // Scores returns the score answers keyed by question name.
 func (r *SystemOneResponse) Scores() map[string]*ScoreAnswer { return r.scores }
+
+// Boxes returns the box answers keyed by question name.
+func (r *SystemOneResponse) Boxes() map[string]*BoxAnswer { return r.boxes }
 
 // RequestID returns the x-typesafe-request-id response header. It reports an error when the
 // response did not carry one.
@@ -260,7 +298,7 @@ func (r *ListModelsResponse) MarshalJSON() ([]byte, error) {
 // answerTypes are the answer discriminators this SDK version models. Answers of any other type
 // are dropped from the typed view so a newer server cannot break an older client; they stay
 // reachable through RawBody.
-var answerTypes = map[string]bool{"noul": true, "choice": true, "score": true}
+var answerTypes = map[string]bool{"noul": true, "choice": true, "score": true, "box": true}
 
 // Answers is a map of question names to answers, decoded by each entry's "type" discriminator.
 //
@@ -387,22 +425,20 @@ func (d *decoder) decodeModel(target *string) error {
 	return nil
 }
 
-// decodeUsage decodes the required usage object, reporting the exact path of a missing or malformed
-// count. Both counts are required, as the official SDK's types declare them.
+// decodeUsage decodes the usage object.
+// In accordance with the API reference and JS SDK v0.7.0, token counts may be null or omitted.
 func (d *decoder) decodeUsage(target *Usage) error {
 	var wire struct {
 		InputTokens  *int `json:"input_tokens"`
 		OutputTokens *int `json:"output_tokens"`
 	}
 	if err := json.Unmarshal(d.envelope.Usage, &wire); err == nil && !isJSONNull(d.envelope.Usage) {
-		switch {
-		case wire.InputTokens == nil:
-			return d.invalid("usage.input_tokens")
-		case wire.OutputTokens == nil:
-			return d.invalid("usage.output_tokens")
+		if wire.InputTokens != nil {
+			target.InputTokens = *wire.InputTokens
 		}
-		target.InputTokens = *wire.InputTokens
-		target.OutputTokens = *wire.OutputTokens
+		if wire.OutputTokens != nil {
+			target.OutputTokens = *wire.OutputTokens
+		}
 		return nil
 	}
 	fields, ok := objectEntries(d.envelope.Usage)
@@ -417,8 +453,8 @@ func (d *decoder) decodeUsage(target *Usage) error {
 		{"output_tokens", &target.OutputTokens},
 	} {
 		value, present := fields[counter.name]
-		if !present {
-			return d.invalid("usage." + counter.name)
+		if !present || isJSONNull(value) {
+			continue
 		}
 		count, ok := decodeCount(value)
 		if !ok {
@@ -527,6 +563,7 @@ func parseSystemOneResponse(resp *response, questions []string, logger *slog.Log
 		nouls:       map[string]*NoulAnswer{},
 		choices:     map[string]*ChoiceAnswer{},
 		scores:      map[string]*ScoreAnswer{},
+		boxes:       map[string]*BoxAnswer{},
 	}
 	if err := d.decodeModel(&result.Model); err != nil {
 		return nil, err
@@ -574,6 +611,8 @@ func parseAnswers(raw json.RawMessage, questions []string, result *SystemOneResp
 			result.Answers[name], result.choices[name] = typed, typed
 		case *ScoreAnswer:
 			result.Answers[name], result.scores[name] = typed, typed
+		case *BoxAnswer:
+			result.Answers[name], result.boxes[name] = typed, typed
 		}
 	}
 	return nil
@@ -636,7 +675,7 @@ func parseAnswer(name string, raw json.RawMessage, d *decoder) (Answer, error) {
 			Probabilities: probabilities,
 		}, nil
 
-	default: // "score"
+	case "score":
 		score, err := number("score")
 		if err != nil {
 			return nil, err
@@ -659,6 +698,49 @@ func parseAnswer(name string, raw json.RawMessage, d *decoder) (Answer, error) {
 			Confidence:    confidence,
 			Legend:        legend,
 			Probabilities: probabilities,
+		}, nil
+
+	default: // "box"
+		boxRaw, ok := fields["box"]
+		if !ok || isJSONNull(boxRaw) {
+			return nil, d.invalid(answerPath(name, "box"))
+		}
+		boxFields, ok := objectEntries(boxRaw)
+		if !ok {
+			return nil, d.invalid(answerPath(name, "box"))
+		}
+		var coords BoxCoordinates
+		for _, edge := range []struct {
+			name   string
+			target *float64
+		}{
+			{"top", &coords.Top},
+			{"bottom", &coords.Bottom},
+			{"left", &coords.Left},
+			{"right", &coords.Right},
+		} {
+			val, present := boxFields[edge.name]
+			if !present {
+				return nil, d.invalid(answerPath(name, "box."+edge.name))
+			}
+			num, ok := decodeNumber(val)
+			if !ok {
+				return nil, d.invalid(answerPath(name, "box."+edge.name))
+			}
+			*edge.target = num
+		}
+		var confPtr *float64
+		if confRaw, present := fields["confidence"]; present && !isJSONNull(confRaw) {
+			confVal, ok := decodeNumber(confRaw)
+			if !ok {
+				return nil, d.invalid(answerPath(name, "confidence"))
+			}
+			confPtr = new(confVal)
+		}
+		return &BoxAnswer{
+			Type:       "box",
+			Box:        coords,
+			Confidence: confPtr,
 		}, nil
 	}
 }

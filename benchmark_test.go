@@ -180,7 +180,7 @@ func BenchmarkRequestHeaders(b *testing.B) {
 	}
 	b.ReportAllocs()
 	for b.Loop() {
-		benchSinkHeader = buildHeaders(config, req, true)
+		benchSinkHeader = buildHeaders(config, req, true, false)
 	}
 }
 

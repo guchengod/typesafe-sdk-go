@@ -221,9 +221,9 @@ func TestSystemOneResponseRequiresAnswers(t *testing.T) {
 	}
 }
 
-// TestSystemOneResponseRequiresTokenCounts pins that both usage counts are required, as the official
-// SDK's types declare them.
-func TestSystemOneResponseRequiresTokenCounts(t *testing.T) {
+// TestSystemOneResponseMalformedUsage tests that invalid usage types (fractional numbers, non-objects)
+// trigger a validation error.
+func TestSystemOneResponseMalformedUsage(t *testing.T) {
 	t.Parallel()
 	const endpoint = "POST https://api.typesafe.ai/v1/systemone"
 	cases := []struct {
@@ -232,19 +232,14 @@ func TestSystemOneResponseRequiresTokenCounts(t *testing.T) {
 		path string
 	}{
 		{
-			name: "absent input count",
-			body: `{"model":"test","usage":{"output_tokens":1},"answers":` + fixedAnswersJSON + `}`,
-			path: "usage.input_tokens",
-		},
-		{
-			name: "null output count",
-			body: `{"model":"test","usage":{"input_tokens":1,"output_tokens":null},"answers":` + fixedAnswersJSON + `}`,
-			path: "usage.output_tokens",
-		},
-		{
 			name: "fractional input count",
 			body: `{"model":"test","usage":{"input_tokens":1.5,"output_tokens":1},"answers":` + fixedAnswersJSON + `}`,
 			path: "usage.input_tokens",
+		},
+		{
+			name: "fractional output count",
+			body: `{"model":"test","usage":{"input_tokens":1,"output_tokens":2.5},"answers":` + fixedAnswersJSON + `}`,
+			path: "usage.output_tokens",
 		},
 		{
 			name: "usage is not an object",
@@ -258,6 +253,58 @@ func TestSystemOneResponseRequiresTokenCounts(t *testing.T) {
 
 			_, err := client.SystemOne(t.Context(), "state", fixedQuestions())
 			responseTestAssertValidationError(t, err, endpoint, testCase.path, "req-123", testCase.body)
+		})
+	}
+}
+
+// TestSystemOneResponseNullableTokenCounts tests that absent or null token counts in usage
+// are tolerated without error, matching API spec and JS SDK v0.7.0.
+func TestSystemOneResponseNullableTokenCounts(t *testing.T) {
+	t.Parallel()
+	cases := []struct {
+		name       string
+		body       string
+		wantInput  int
+		wantOutput int
+	}{
+		{
+			name:       "absent input count",
+			body:       `{"model":"test","usage":{"output_tokens":5},"answers":` + fixedAnswersJSON + `}`,
+			wantInput:  0,
+			wantOutput: 5,
+		},
+		{
+			name:       "null output count",
+			body:       `{"model":"test","usage":{"input_tokens":10,"output_tokens":null},"answers":` + fixedAnswersJSON + `}`,
+			wantInput:  10,
+			wantOutput: 0,
+		},
+		{
+			name:       "both null",
+			body:       `{"model":"test","usage":{"input_tokens":null,"output_tokens":null},"answers":` + fixedAnswersJSON + `}`,
+			wantInput:  0,
+			wantOutput: 0,
+		},
+		{
+			name:       "empty usage object",
+			body:       `{"model":"test","usage":{},"answers":` + fixedAnswersJSON + `}`,
+			wantInput:  0,
+			wantOutput: 0,
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			client := responseTestJSONClient(t, tc.body, "req-123")
+			resp, err := client.SystemOne(t.Context(), "state", fixedQuestions())
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if resp.Usage.InputTokens != tc.wantInput {
+				t.Errorf("InputTokens = %d, want %d", resp.Usage.InputTokens, tc.wantInput)
+			}
+			if resp.Usage.OutputTokens != tc.wantOutput {
+				t.Errorf("OutputTokens = %d, want %d", resp.Usage.OutputTokens, tc.wantOutput)
+			}
 		})
 	}
 }
@@ -1232,4 +1279,95 @@ func TestAnswersCarriesResponseValidationPath(t *testing.T) {
 
 	_, err := SystemOneAs[custom](t.Context(), client, "state", Questions{"q": NewNoul("Placeholder?")})
 	responseTestAssertValidationError(t, err, "POST https://api.typesafe.ai/v1/systemone", "answers.q.noul", "req-answers", body)
+}
+
+func TestBoxAnswerParsing(t *testing.T) {
+	t.Parallel()
+
+	body := `{
+		"model": "jev-preview",
+		"usage": {"input_tokens": 100, "output_tokens": 20},
+		"answers": {
+			"mug": {
+				"type": "box",
+				"box": {"top": 0.25, "bottom": 0.82, "left": 0.44, "right": 0.84},
+				"confidence": 0.92
+			},
+			"plate": {
+				"type": "box",
+				"box": {"top": 0.1, "bottom": 0.5, "left": 0.2, "right": 0.6},
+				"confidence": null
+			}
+		}
+	}`
+	client := responseTestJSONClient(t, body, "req-box-1")
+	resp, err := client.SystemOne(t.Context(), "kitchen", Questions{
+		"mug":   NewBox("the mug"),
+		"plate": NewBox("the plate"),
+	})
+	if err != nil {
+		t.Fatalf("SystemOne failed: %v", err)
+	}
+
+	boxes := resp.Boxes()
+	if len(boxes) != 2 {
+		t.Fatalf("got %d boxes, want 2", len(boxes))
+	}
+
+	mug := boxes["mug"]
+	if mug == nil {
+		t.Fatal("mug answer is nil")
+	}
+	if mug.Type != "box" || mug.AnswerType() != "box" {
+		t.Errorf("mug type = %q", mug.Type)
+	}
+	if mug.Box.Top != 0.25 || mug.Box.Bottom != 0.82 || mug.Box.Left != 0.44 || mug.Box.Right != 0.84 {
+		t.Errorf("mug coordinates = %+v", mug.Box)
+	}
+	if mug.Confidence == nil || *mug.Confidence != 0.92 {
+		t.Errorf("mug confidence = %v, want 0.92", mug.Confidence)
+	}
+
+	plate := boxes["plate"]
+	if plate == nil {
+		t.Fatal("plate answer is nil")
+	}
+	if plate.Confidence != nil {
+		t.Errorf("plate confidence = %v, want nil", plate.Confidence)
+	}
+}
+
+func TestBoxAnswerSystemOneAs(t *testing.T) {
+	t.Parallel()
+
+	type Ticket struct {
+		Model string    `json:"model"`
+		Mug   BoxAnswer `json:"mug"`
+	}
+
+	body := `{
+		"model": "jev-preview",
+		"usage": {"input_tokens": 50, "output_tokens": 10},
+		"answers": {
+			"mug": {
+				"type": "box",
+				"box": {"top": 0.1, "bottom": 0.9, "left": 0.2, "right": 0.8},
+				"confidence": 0.88
+			}
+		}
+	}`
+	client := responseTestJSONClient(t, body, "req-box-as")
+	result, err := SystemOneAs[Ticket](t.Context(), client, "state", Questions{"mug": NewBox("the mug")})
+	if err != nil {
+		t.Fatalf("SystemOneAs failed: %v", err)
+	}
+	if result.Model != "jev-preview" {
+		t.Errorf("Model = %q, want jev-preview", result.Model)
+	}
+	if result.Mug.Box.Top != 0.1 || result.Mug.Box.Right != 0.8 {
+		t.Errorf("Mug box = %+v", result.Mug.Box)
+	}
+	if result.Mug.Confidence == nil || *result.Mug.Confidence != 0.88 {
+		t.Errorf("Mug confidence = %v, want 0.88", result.Mug.Confidence)
+	}
 }

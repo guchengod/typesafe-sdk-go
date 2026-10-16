@@ -169,6 +169,18 @@ type UnprocessableEntityError struct{ APIError }
 // Unwrap exposes the embedded [APIError] to [errors.As].
 func (e *UnprocessableEntityError) Unwrap() error { return &e.APIError }
 
+// PayloadTooLargeError is an HTTP 413 response.
+type PayloadTooLargeError struct{ APIError }
+
+// Unwrap exposes the embedded [APIError] to [errors.As].
+func (e *PayloadTooLargeError) Unwrap() error { return &e.APIError }
+
+// UnsupportedMediaTypeError is an HTTP 415 response.
+type UnsupportedMediaTypeError struct{ APIError }
+
+// Unwrap exposes the embedded [APIError] to [errors.As].
+func (e *UnsupportedMediaTypeError) Unwrap() error { return &e.APIError }
+
 // RateLimitError is an HTTP 429 response.
 type RateLimitError struct {
 	APIError
@@ -315,11 +327,17 @@ func AsTimeoutError(err error) (*APITimeoutError, bool) {
 // AsValidationError extracts the [APIResponseValidationError] when a successful response
 // could not be decoded.
 func AsValidationError(err error) (*APIResponseValidationError, bool) {
-	var validation *APIResponseValidationError
-	if errors.As(err, &validation) {
-		return validation, true
-	}
-	return nil, false
+	return errors.AsType[*APIResponseValidationError](err)
+}
+
+// AsPayloadTooLargeError extracts the [PayloadTooLargeError] when the failure was an HTTP 413.
+func AsPayloadTooLargeError(err error) (*PayloadTooLargeError, bool) {
+	return errors.AsType[*PayloadTooLargeError](err)
+}
+
+// AsUnsupportedMediaTypeError extracts the [UnsupportedMediaTypeError] when the failure was an HTTP 415.
+func AsUnsupportedMediaTypeError(err error) (*UnsupportedMediaTypeError, bool) {
+	return errors.AsType[*UnsupportedMediaTypeError](err)
 }
 
 // cleanEndpoint returns "METHOD URL" with userinfo, query parameters, and fragments removed,
@@ -507,6 +525,10 @@ func newAPIError(status int, body any, rawBody []byte, headers http.Header, endp
 		return &NotFoundError{APIError: base}
 	case http.StatusUnprocessableEntity:
 		return &UnprocessableEntityError{APIError: base}
+	case StatusPayloadTooLarge:
+		return &PayloadTooLargeError{APIError: base}
+	case StatusUnsupportedMediaType:
+		return &UnsupportedMediaTypeError{APIError: base}
 	case http.StatusTooManyRequests:
 		rateLimit := &RateLimitError{APIError: base}
 		if delay, ok := parseRetryAfter(headers); ok {

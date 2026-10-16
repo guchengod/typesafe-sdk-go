@@ -1147,6 +1147,7 @@ func TestSystemOneAcceptsEveryQuestionContainer(t *testing.T) {
 		{name: "map of noul pointers", questions: map[string]*NoulQuestion{"q": NewNoul("Is this spam?")}, want: map[string]any{"q": noulWire}},
 		{name: "map of choice pointers", questions: map[string]*ChoiceQuestion{"q": NewChoice(map[string]any{"calm": nil}, WithInstructions("Tone?"))}, want: map[string]any{"q": choiceWire}},
 		{name: "map of score pointers", questions: map[string]*ScoreQuestion{"q": NewScore([]any{"bad", "good"})}, want: map[string]any{"q": scoreWire}},
+		{name: "map of box pointers", questions: map[string]*BoxQuestion{"q": NewBox("the mug in photo")}, want: map[string]any{"q": map[string]any{"type": "box", "instructions": "the mug in photo"}}},
 		{name: "map of Question", questions: map[string]Question{"q": NewChoice(map[string]any{"calm": nil}, WithInstructions("Tone?"))}, want: map[string]any{"q": choiceWire}},
 		{name: "map of any with a raw value", questions: map[string]any{"q": map[string]any{"type": "noul", "instructions": "Is this spam?"}}, want: map[string]any{"q": noulWire}},
 		{name: "map of any with a typed value", questions: map[string]any{"q": NewScore([]any{"bad", "good"})}, want: map[string]any{"q": scoreWire}},
@@ -1168,5 +1169,35 @@ func TestSystemOneAcceptsEveryQuestionContainer(t *testing.T) {
 	for index, container := range containers {
 		questionsAssertEqual(t, "questions for "+container.name,
 			decodingBody(t, calls[index])["questions"], container.want)
+	}
+}
+
+func TestBoxQuestionSerializationAndOptions(t *testing.T) {
+	t.Parallel()
+
+	box := NewBox("find the logo", WithQuestionField("custom", "val"))
+	if box.QuestionType() != "box" {
+		t.Errorf("QuestionType = %q, want box", box.QuestionType())
+	}
+	if err := box.Validate("logo"); err != nil {
+		t.Errorf("Validate failed: %v", err)
+	}
+
+	encoded, err := json.Marshal(box)
+	if err != nil {
+		t.Fatalf("json.Marshal failed: %v", err)
+	}
+	var decoded map[string]any
+	if err := json.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("json.Unmarshal failed: %v", err)
+	}
+	if decoded["type"] != "box" {
+		t.Errorf("type = %v, want box", decoded["type"])
+	}
+	if decoded["instructions"] != "find the logo" {
+		t.Errorf("instructions = %v, want find the logo", decoded["instructions"])
+	}
+	if decoded["custom"] != "val" {
+		t.Errorf("custom = %v, want val", decoded["custom"])
 	}
 }

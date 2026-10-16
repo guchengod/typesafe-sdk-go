@@ -1,6 +1,8 @@
 package typesafe
 
 import (
+	"bytes"
+	"compress/gzip"
 	"errors"
 	"io"
 	"log/slog"
@@ -663,5 +665,100 @@ func TestClientModelsListAcceptsEmptyList(t *testing.T) {
 	}
 	if len(response.Models) != 0 {
 		t.Errorf("Models = %+v, want no models", response.Models)
+	}
+}
+
+func TestClientRequestCompression(t *testing.T) {
+	t.Parallel()
+
+	transport := clientTestAnsweringTransport(http.StatusOK, `{"model":"jev-latest","usage":{"input_tokens":10,"output_tokens":2},"answers":{"q":{"type":"noul","noul":0.5}}}`)
+	client := clientTestNewClient(t, WithTransport(transport))
+
+	// Small body (< 1 KiB)
+	_, err := client.SystemOne(t.Context(), "small state", Questions{"q": NewNoul("test")})
+	if err != nil {
+		t.Fatalf("SystemOne failed: %v", err)
+	}
+	call := transport.lastCall(t)
+	if enc := call.Header.Get(HeaderContentEncoding); enc != "" {
+		t.Errorf("small body: Content-Encoding = %q, want empty", enc)
+	}
+
+	// Large body (>= 1 KiB)
+	largeState := strings.Repeat("a long text string for compression testing ", 30) // ~1.3 KiB
+	_, err = client.SystemOne(t.Context(), largeState, Questions{"q": NewNoul("test")})
+	if err != nil {
+		t.Fatalf("SystemOne failed: %v", err)
+	}
+	call = transport.lastCall(t)
+	if enc := call.Header.Get(HeaderContentEncoding); enc != EncodingGzip {
+		t.Errorf("large body: Content-Encoding = %q, want gzip", enc)
+	}
+
+	// Verify gzip decompression
+	gr, err := gzip.NewReader(bytes.NewReader(call.Body))
+	if err != nil {
+		t.Fatalf("gzip.NewReader failed: %v", err)
+	}
+	decompressed, err := io.ReadAll(gr)
+	if err != nil {
+		t.Fatalf("decompression failed: %v", err)
+	}
+	if !strings.Contains(string(decompressed), largeState) {
+		t.Errorf("decompressed body does not contain state")
+	}
+
+	// WithCallCompression(false) on large body
+	_, err = client.SystemOne(t.Context(), largeState, Questions{"q": NewNoul("test")}, WithCallCompression(false))
+	if err != nil {
+		t.Fatalf("SystemOne failed: %v", err)
+	}
+	call = transport.lastCall(t)
+	if enc := call.Header.Get(HeaderContentEncoding); enc != "" {
+		t.Errorf("WithCallCompression(false): Content-Encoding = %q, want empty", enc)
+	}
+	if !strings.Contains(string(call.Body), largeState) {
+		t.Errorf("recorded body is not raw JSON")
+	}
+}
+
+func TestClientDangerZoneHeaders(t *testing.T) {
+	t.Parallel()
+
+	transport := clientTestAnsweringTransport(http.StatusOK, `{"model":"jev-latest","usage":{"input_tokens":10,"output_tokens":2},"answers":{"q":{"type":"noul","noul":0.5}}}`)
+
+	// Client configured with both danger zone headers
+	client := clientTestNewClient(t,
+		WithTransport(transport),
+		WithLongContext(true),
+		WithImages(true),
+	)
+
+	_, err := client.SystemOne(t.Context(), "test", Questions{"q": NewNoul("test")})
+	if err != nil {
+		t.Fatalf("SystemOne failed: %v", err)
+	}
+	call := transport.lastCall(t)
+	if call.Header.Get(HeaderDangerZoneLongContext) != "true" {
+		t.Errorf("missing %s", HeaderDangerZoneLongContext)
+	}
+	if call.Header.Get(HeaderDangerZoneImages) != "true" {
+		t.Errorf("missing %s", HeaderDangerZoneImages)
+	}
+
+	// Overriding with call options to disable them
+	_, err = client.SystemOne(t.Context(), "test", Questions{"q": NewNoul("test")},
+		WithCallLongContext(false),
+		WithCallImages(false),
+	)
+	if err != nil {
+		t.Fatalf("SystemOne failed: %v", err)
+	}
+	call = transport.lastCall(t)
+	if call.Header.Get(HeaderDangerZoneLongContext) != "" {
+		t.Errorf("%s present after WithCallLongContext(false)", HeaderDangerZoneLongContext)
+	}
+	if call.Header.Get(HeaderDangerZoneImages) != "" {
+		t.Errorf("%s present after WithCallImages(false)", HeaderDangerZoneImages)
 	}
 }

@@ -38,6 +38,16 @@ type Config struct {
 
 	// Transport is the caller-supplied transport, or nil when the SDK owns its transport.
 	Transport http.RoundTripper
+
+	// Compression enables automatic request body compression for bodies >= 1 KiB.
+	// Defaults to true.
+	Compression bool
+
+	// LongContext enables the TypeSafe-Danger-Zone-Long-Context header by default (262k token context).
+	LongContext bool
+
+	// Images enables the TypeSafe-Danger-Zone-Images header by default.
+	Images bool
 }
 
 // Option configures a [Client] at construction time.
@@ -53,6 +63,25 @@ type configOptions struct {
 	retryPolicy    *RetryPolicy
 	httpClient     *http.Client
 	transport      http.RoundTripper
+	compression    *bool
+	longContext    *bool
+	images         *bool
+}
+
+// WithCompression sets whether request bodies >= 1 KiB are compressed (gzip).
+// Default is true. Pass false to send uncompressed bodies.
+func WithCompression(enabled bool) Option {
+	return func(o *configOptions) { o.compression = new(enabled) }
+}
+
+// WithLongContext sets whether to send TypeSafe-Danger-Zone-Long-Context: true with every request.
+func WithLongContext(enabled bool) Option {
+	return func(o *configOptions) { o.longContext = new(enabled) }
+}
+
+// WithImages sets whether to send TypeSafe-Danger-Zone-Images: true with every request.
+func WithImages(enabled bool) Option {
+	return func(o *configOptions) { o.images = new(enabled) }
 }
 
 // WithAPIKey sets the API key, overriding the TYPESAFE_API_KEY environment variable.
@@ -134,6 +163,10 @@ type requestOptions struct {
 	extraHeaders map[string]string
 	extraBody    map[string]any
 	model        string
+	compression  *bool
+	longContext  *bool
+	images       *bool
+	assets       map[string]any
 }
 
 // WithCallTimeout overrides the HTTP timeout for a single call. It must be positive.
@@ -172,6 +205,46 @@ func WithCallHeaders(headers map[string]string) RequestOption {
 // WithModel overrides the model for a single call.
 func WithModel(model string) RequestOption {
 	return func(o *requestOptions) { o.model = model }
+}
+
+// WithCallCompression overrides body compression for a single call.
+func WithCallCompression(enabled bool) RequestOption {
+	return func(o *requestOptions) { o.compression = new(enabled) }
+}
+
+// WithCallLongContext sets TypeSafe-Danger-Zone-Long-Context: true for a single call.
+func WithCallLongContext(enabled bool) RequestOption {
+	return func(o *requestOptions) { o.longContext = new(enabled) }
+}
+
+// WithCallImages sets TypeSafe-Danger-Zone-Images: true for a single call.
+func WithCallImages(enabled bool) RequestOption {
+	return func(o *requestOptions) { o.images = new(enabled) }
+}
+
+// WithAssets attaches an assets map to the request, containing image assets.
+// It accepts [Assets], map[string]Asset, or map[string]any.
+func WithAssets(assets any) RequestOption {
+	return func(o *requestOptions) {
+		switch typed := assets.(type) {
+		case nil:
+			o.assets = nil
+		case Assets:
+			m := make(map[string]any, len(typed))
+			for k, v := range typed {
+				m[k] = v
+			}
+			o.assets = m
+		case map[string]Asset:
+			m := make(map[string]any, len(typed))
+			for k, v := range typed {
+				m[k] = v
+			}
+			o.assets = m
+		case map[string]any:
+			o.assets = typed
+		}
+	}
 }
 
 // WithExtraBody adds top-level fields to a request body, shallow-merged over "state", "model",
@@ -229,11 +302,30 @@ func resolveConfig(opts []Option) (*Config, error) {
 		logger = defaultLogger()
 	}
 
-	headers := make(http.Header, len(options.defaultHeaders))
+	compression := true
+	if options.compression != nil {
+		compression = *options.compression
+	}
+	longContext := false
+	if options.longContext != nil {
+		longContext = *options.longContext
+	}
+	images := false
+	if options.images != nil {
+		images = *options.images
+	}
+
+	headers := make(http.Header, len(options.defaultHeaders)+2)
 	for name, values := range options.defaultHeaders {
 		for _, value := range values {
 			headers.Add(name, value)
 		}
+	}
+	if longContext {
+		headers.Set(HeaderDangerZoneLongContext, "true")
+	}
+	if images {
+		headers.Set(HeaderDangerZoneImages, "true")
 	}
 
 	return &Config{
@@ -246,5 +338,8 @@ func resolveConfig(opts []Option) (*Config, error) {
 		RetryPolicy:    policy,
 		HTTPClient:     options.httpClient,
 		Transport:      options.transport,
+		Compression:    compression,
+		LongContext:    longContext,
+		Images:         images,
 	}, nil
 }

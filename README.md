@@ -4,28 +4,42 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/guchengod/typesafe-sdk-go.svg)](https://pkg.go.dev/github.com/guchengod/typesafe-sdk-go)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-Go SDK for [TypeSafe AI](https://typesafe.ai) — deterministic evaluation models that answer
-classification and rating questions about any text or JSON you already have.
-
-Ask up to dozens of questions in one call, and get back probabilities, labels, and rubric scores
-instead of free-form text you have to parse.
-
-- **Standard library only.** `net/http`, `encoding/json`, and `log/slog`. No runtime dependencies.
-- **Concurrency-safe by construction.** A `Client` holds no per-request state and pools
-  connections; every call takes a `context.Context`.
-- **Resilient by default.** Jittered exponential backoff with `Retry-After` support capped at a
-  minute, and an optional overall budget.
-- **Typed everything.** Typed errors you can match with `errors.As`, typed answers, and
-  `SystemOneAs[T]` for your own response models.
-- **A CLI when you want one.** `cmd/typesafe` wraps the same client for shell scripts and
-  pipelines; install it with `go install` or grab a binary from
-  [Releases](https://github.com/guchengod/typesafe-sdk-go/releases).
-
-Requires **Go 1.26 or newer**.
+[**简体中文**](#typesafe-ai-go-sdk) | [**English**](#english-version)
 
 ---
 
-## Installation
+[TypeSafe AI](https://typesafe.ai) 官方 Go 语言客户端 SDK —— 用于对任意文本、结构化数据或图像进行确定性定性判断、分类评级与目标定位（System One 定性决策模型）。
+
+单次调用可并发评估数十个问题，直接返回校准概率、选项标签、评分以及边界框坐标，无需解析和清洗自由格式的大模型文本。
+
+- **纯标准库实现**：仅依赖 `net/http`、`encoding/json` 与 `log/slog`，零外部依赖，极速编译。
+- **天然并发安全**：`Client` 不保存每请求可变状态，底层连接池高效复用，方法均支持 `context.Context`。
+- **自动透明压缩**：请求体 $\ge 1\text{ KiB}$ 自动启用标准 Gzip 压缩，大幅缩减网络带宽和传输延迟。
+- **原生多模态与目标定位**：全面支持 `Image` 图片资产与 `Box` 图像目标检测边界框问答。
+- **健壮默认重试**：基于指数退避加抖动的自适应重试，深度支持服务端 `Retry-After` 标头。
+- **强类型设计**：全链路结构体类型支持，可配合 `errors.As` 提取细分错误，亦可通过 `SystemOneAs[T]` 反序列化到自定义业务结构体。
+- **开箱即用 CLI**：附带纯标准库打造的命令行工具 `cmd/typesafe`，完美适配 Shell 脚本与流水线。
+
+> 需要 **Go 1.26 或更高版本**。
+
+---
+
+## 目录
+
+- [安装](#安装)
+- [快速上手](#快速上手)
+- [核心问答原语](#核心问答原语)
+- [多模态图像与目标定位 (Box)](#多模态图像与目标定位-box)
+- [结构化泛型解码 (`SystemOneAs`)](#结构化泛型解码-systemoneas)
+- [模型使用规范与模式指南](#模型使用规范与模式指南)
+- [🤖 AI Agent 专用系统提示词](#-ai-agent-专用系统提示词)
+- [命令行工具 (CLI)](#命令行工具-cli)
+- [错误处理](#错误处理)
+- [English Version](#english-version)
+
+---
+
+## 安装
 
 ```bash
 go get github.com/guchengod/typesafe-sdk-go
@@ -37,15 +51,15 @@ import typesafe "github.com/guchengod/typesafe-sdk-go"
 
 ---
 
-## Quickstart
+## 快速上手
 
-Set your API key in the environment:
+配置环境变量 `TYPESAFE_API_KEY`：
 
 ```bash
 export TYPESAFE_API_KEY="ts_live_..."
 ```
 
-Then create a client and ask questions about your content:
+编写代码发起评估：
 
 ```go
 package main
@@ -59,7 +73,7 @@ import (
 )
 
 func main() {
-	client, err := typesafe.NewClient() // reads TYPESAFE_API_KEY
+	client, err := typesafe.NewClient() // 自动读取 TYPESAFE_API_KEY
 	if err != nil {
 		log.Fatal(err)
 	}
@@ -69,7 +83,338 @@ func main() {
 		context.Background(),
 		map[string]any{
 			"channel":  "email",
-			"document": "I was charged twice on my credit card for invoice #4912. Please refund immediately.",
+			"document": "信用卡账单 #4912 被重复扣费了，请立即为我办理退款。",
+		},
+		typesafe.Questions{
+			"billing": typesafe.NewNoul("该内容是否与账单或退款相关？"),
+			"category": typesafe.NewChoice(
+				map[string]any{
+					"billing":   "扣费、退款或发票问题",
+					"technical": "系统故障、崩溃或 API 问题",
+					"other":     nil, // nil 表示该选项无额外细化描述
+				},
+				typesafe.WithInstructions("该工单应指派到哪个部门？"),
+			),
+			"urgency": typesafe.NewScore(
+				[]any{"可等待至下周", "需在 48 小时内处理", "需当天立即处理"},
+				typesafe.WithInstructions("客户情绪和问题的紧急程度如何？"),
+			),
+		},
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	fmt.Printf("billing p(true) = %.2f\n", response.Nouls()["billing"].Noul)
+	fmt.Printf("category        = %s (置信度 %.2f)\n", response.Choices()["category"].Choice, response.Choices()["category"].Confidence)
+	fmt.Printf("urgency score   = %.2f / 2 (置信度 %.2f)\n", response.Scores()["urgency"].Score, response.Scores()["urgency"].Confidence)
+}
+```
+
+---
+
+## 核心问答原语
+
+TypeSafe 提供了四种面向结构化决策的确定性原子问题类型：
+
+| 原语 | 构造函数 | 输出结果 | 典型场景 |
+| --- | --- | --- | --- |
+| **Noul** | `NewNoul(instruction, ...)` | `NoulAnswer.Noul` (0.0 ~ 1.0 的 Yes 概率) | 二元判断、安全合规审核、意图判别 |
+| **Choice** | `NewChoice(criteria, ...)` | `ChoiceAnswer.Choice` (最高概率选项), `Probabilities`, `Confidence` | 多分类路由、工单分流（最多支持 255 个选项） |
+| **Score** | `NewScore(criteria, ...)` | `ScoreAnswer.Score` (概率加权期望分), `Confidence`, `Legend` | 评级打分、情绪指数、优先级评定（支持 2~10 级） |
+| **Box** | `NewBox(instruction, ...)` | `BoxAnswer.Box` (上下左右边界分数), `Confidence` | 图像目标定位、目标裁剪与坐标识别 |
+
+---
+
+## 多模态图像与目标定位 (Box)
+
+TypeSafe 支持在 `state`、问题指令或准则中直接包含图像，并使用 `Box` 原语在图像中精准定位物体。
+
+> 开启图片或 Box 问题需要使用 `jev-preview` 模型，并附带 `TypeSafe-Danger-Zone-Images: true` 标头（通过 `typesafe.WithImages(true)` 或调用选项 `typesafe.WithCallImages(true)` 开启）。
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	typesafe "github.com/guchengod/typesafe-sdk-go"
+)
+
+func main() {
+	client, err := typesafe.NewClient(typesafe.WithImages(true))
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+
+	// 从文件加载图像
+	photo, err := typesafe.NewImageFromFile("kitchen.jpg")
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	// 图像可直接嵌入 state 中，SDK 将自动收集并维护引用关系
+	resp, err := client.SystemOne(
+		context.Background(),
+		map[string]any{"photo": photo},
+		typesafe.Questions{
+			"has_cup": typesafe.NewNoul("`photo` 中是否有咖啡杯？"),
+			"cup_box": typesafe.NewBox("`photo` 中的咖啡杯"),
+		},
+		typesafe.WithModel(typesafe.ModelJevPreview),
+	)
+	if err != nil {
+		log.Fatal(err)
+	}
+
+	if resp.Nouls()["has_cup"].Noul > 0.8 {
+		box := resp.Boxes()["cup_box"].Box
+		fmt.Printf("找到咖啡杯！边界: Top=%.2f, Bottom=%.2f, Left=%.2f, Right=%.2f\n",
+			box.Top, box.Bottom, box.Left, box.Right)
+	}
+}
+```
+
+---
+
+## 结构化泛型解码 (`SystemOneAs`)
+
+使用 `SystemOneAs[T]` 可直接将返回结果映射到自定义业务结构体中：
+
+```go
+type TicketAnalysis struct {
+	Model    string                  `json:"model"`
+	Usage    typesafe.Usage          `json:"usage"`
+	Billing  typesafe.NoulAnswer     `json:"billing"`
+	Category typesafe.ChoiceAnswer   `json:"category"`
+	Urgency  typesafe.ScoreAnswer    `json:"urgency"`
+	Target   *typesafe.BoxAnswer     `json:"target,omitempty"`
+}
+
+result, err := typesafe.SystemOneAs[TicketAnalysis](ctx, client, state, questions)
+if err != nil {
+	log.Fatal(err)
+}
+fmt.Println(result.Category.Choice, result.Billing.Noul)
+```
+
+---
+
+## 模型使用规范与模式指南
+
+TypeSafe 的 **Jev** 模型专为离散决策与定性判断设计，输出为校准概率分布。请将算术计算和确定性逻辑保留在 Go 代码中：
+
+### 1. 置信度三段式路由 (Confidence-Gated Routing)
+每个 `Choice` 和 `Score` 答案都包含 `Confidence` (0.0 ~ 1.0)。推荐使用三段式分流策略：
+- **高置信度 ($\ge 0.85$)**：模型极度确信，执行全自动化分支；
+- **中置信度 ($0.50 \sim 0.85$)**：模型倾向某选项但有轻微歧义，标记给操作员复核；
+- **低置信度 ($< 0.50$)**：模型明确表达“我不确定”，回退到人工兜底流程。
+
+### 2. 计数与投机性扇出 (Counting & Speculative Fan-Out)
+Jev 不擅长数数。**统计数量时请在 Go 中执行计算**：在一通 `SystemOne` 请求中扇出多个原子的 `Noul` 问题，再由 Go 代码汇总满足条件的计数。
+
+### 3. Score 评分准则边界
+- 严禁将 `score` 作为连续实数用于插值还原数学物理量；
+- `Score` 用于阈值门禁过滤（如 `score >= 1.5`）；
+- `Score` 级数限制为 **2 至 10 级**，`Choice` 选项最多 **255 个**。
+
+---
+
+## 🤖 AI Agent 专用系统提示词
+
+如果你正在使用 AI 编程助手（如 **Cursor**、**Claude Code**、**GitHub Copilot**、**Windsurf**、**Antigravity** 或各类 Coding Agent），将以下提示词添加到项目中的 `.cursorrules`、`CLAUDE.md` 或 Agent 系统提示词中，可以让 Agent 零失误地直接调用和编写本库：
+
+````markdown
+### TypeSafe AI Go SDK Coding Guidelines for Agent
+
+You are working with the official TypeSafe AI Go SDK (`github.com/guchengod/typesafe-sdk-go`).
+TypeSafe uses calibrated System One models (Jev) for deterministic classification, scoring, verification, and bounding-box object location. It does NOT generate unstructured free text.
+
+#### 1. Core Principles
+- Keep arithmetic, counting, string parsing, and business logic strictly in Go. Use Jev strictly for qualitative judgments.
+- Always reuse a single `*typesafe.Client` (concurrency-safe, pools connections). Close it when done.
+- Pass `context.Context` to all API calls.
+
+#### 2. Initializing Client
+```go
+import typesafe "github.com/guchengod/typesafe-sdk-go"
+
+client, err := typesafe.NewClient(
+    // Optional configurations:
+    // typesafe.WithAPIKey("ts_live_..."), // defaults to TYPESAFE_API_KEY env var
+    // typesafe.WithTimeout(30 * time.Second),
+    // typesafe.WithImages(true), // Danger zone: enables image & box questions
+    // typesafe.WithLongContext(true), // Danger zone: enables 262k token window
+    // typesafe.WithCompression(true), // Enabled by default for bodies >= 1 KiB
+)
+```
+
+#### 3. Defining Questions
+Use `typesafe.Questions` (map[string]typesafe.Question):
+- **Yes/No Probability**: `typesafe.NewNoul("Question text", opts...)`
+  Result: `response.Nouls()["key"].Noul` (float64, 0.0=No, 1.0=Yes)
+- **Categorization**: `typesafe.NewChoice(map[string]any{"label": "description", "other": nil}, typesafe.WithInstructions("..."))`
+  Max 255 options. Result: `response.Choices()["key"].Choice` (string), `.Confidence` (float64)
+- **Rubric Rating**: `typesafe.NewScore([]any{"level0", "level1", "level2"}, typesafe.WithInstructions("..."))`
+  Between 2 and 10 levels. Result: `response.Scores()["key"].Score` (float64, weighted expectation), `.Confidence` (float64)
+- **Object Localization**: `typesafe.NewBox("the target object in `photo`")`
+  Requires `typesafe.WithModel(typesafe.ModelJevPreview)` and `typesafe.WithImages(true)` or `typesafe.WithCallImages(true)`.
+  Result: `response.Boxes()["key"].Box` (`Top`, `Bottom`, `Left`, `Right` in fractions 0..1), `.Confidence` (*float64)
+
+#### 4. Multimodal Images
+```go
+img, err := typesafe.NewImageFromFile("path/to/image.jpg") // PNG or JPEG, max 16 MiB
+// Embed img directly in state map or slice. The SDK automatically serializes it to a reference string and populates the assets payload.
+resp, err := client.SystemOne(ctx, map[string]any{"photo": img}, questions,
+    typesafe.WithModel(typesafe.ModelJevPreview),
+    typesafe.WithCallImages(true),
+)
+```
+
+#### 5. Confidence-Gated Decision Routing
+Always inspect `Confidence` on Choice/Score:
+- `Confidence >= 0.85`: High certainty, trigger automated action.
+- `0.50 <= Confidence < 0.85`: Ambiguous, flag for human review.
+- `Confidence < 0.50`: Uncertain, route to human triage fallback.
+
+#### 6. Strongly-Typed Decoding (`SystemOneAs`)
+Decode straight into a custom struct:
+```go
+type MyResult struct {
+    Billing  typesafe.NoulAnswer   `json:"billing"`
+    Category typesafe.ChoiceAnswer `json:"category"`
+    Urgency  typesafe.ScoreAnswer  `json:"urgency"`
+}
+res, err := typesafe.SystemOneAs[MyResult](ctx, client, state, questions)
+```
+
+#### 7. Error Handling
+SDK errors are strongly typed:
+```go
+if apiErr, ok := typesafe.AsRateLimitError(err); ok {
+    wait, _ := apiErr.RetryAfter()
+    time.Sleep(wait)
+} else if ptlErr, ok := typesafe.AsPayloadTooLargeError(err); ok {
+    // 413 Payload Too Large (>32 MiB)
+} else if apiErr, ok := typesafe.AsAPIError(err); ok {
+    log.Printf("API error %d: %s (req_id=%s)", apiErr.Status, apiErr.Message, apiErr.RequestID)
+}
+```
+````
+
+---
+
+## 命令行工具 (CLI)
+
+SDK 内置了轻量级 CLI 工具 `typesafe`：
+
+```bash
+go install github.com/guchengod/typesafe-sdk-go/cmd/typesafe@latest
+```
+
+使用示例：
+
+```bash
+export TYPESAFE_API_KEY="ts_live_..."
+
+# 查看可用模型
+typesafe models --format text
+
+# 发起问答评估（支持文本与 JSON 输出）
+typesafe ask \
+  --state '{"body": "发票 #4912 被扣了两次钱。"}' \
+  --noul 'billing=这是账单问题吗？' \
+  --choice 'queue=billing:财务账单,technical:技术故障,other' \
+  --score 'urgency=日常,紧急,严重' \
+  --box 'target=图像中的目标物体' \
+  --format text
+```
+
+配合 `jq` 在 CI/CD 流水线中进行自动化质检：
+
+```bash
+curl -s https://example.test/ticket.json | typesafe ask --state - --questions questions.json | jq '.answers'
+```
+
+---
+
+## 错误处理
+
+SDK 提供了完整的强类型错误体系：
+
+```go
+resp, err := client.SystemOne(ctx, state, questions)
+if err != nil {
+	switch {
+	case errors.Is(err, context.DeadlineExceeded):
+		log.Println("调用超时")
+	default:
+		if rateLimitErr, ok := typesafe.AsRateLimitError(err); ok {
+			wait, _ := rateLimitErr.RetryAfter()
+			log.Printf("触发限频，建议等待: %v", wait)
+		} else if ptlErr, ok := typesafe.AsPayloadTooLargeError(err); ok {
+			log.Printf("请求体超过 32 MiB 上限: %v", ptlErr)
+		} else if apiErr, ok := typesafe.AsAPIError(err); ok {
+			log.Printf("API 响应错误: status=%d, request_id=%s", apiErr.Status, apiErr.RequestID)
+		}
+	}
+}
+```
+
+---
+---
+
+## English Version
+
+Go SDK for [TypeSafe AI](https://typesafe.ai) — calibrated, deterministic System One evaluation models designed for classification, qualitative grading, verification, and bounding box object localization over text, structured JSON, and images.
+
+Ask dozens of questions in a single parallel call and receive calibrated probabilities, categorical labels, scores, and bounding box coordinates rather than unstructured LLM text that requires fragile parsing.
+
+### Highlights
+
+- **Standard Library Only**: Pure Go using `net/http`, `encoding/json`, and `log/slog`. Zero external dependencies.
+- **Concurrency-Safe**: Client instances are stateless across calls and share HTTP connection pools. All methods accept `context.Context`.
+- **Automatic Gzip Compression**: Transparently compresses request bodies $\ge 1\text{ KiB}$ with standard gzip.
+- **Multimodal & Object Localization**: First-class support for `Image` assets and `Box` bounding box question primitives.
+- **Resilient Retries**: Exponential backoff with jitter, honoring upstream `Retry-After` response headers.
+- **Strongly Typed**: Typed error taxonomy (`errors.As`), typed responses, and `SystemOneAs[T]` for custom struct decoding.
+- **Built-in CLI**: `cmd/typesafe` for pipelines, shell scripts, and terminal inspection.
+
+Requires **Go 1.26 or newer**.
+
+### English Quickstart
+
+```bash
+export TYPESAFE_API_KEY="ts_live_..."
+go get github.com/guchengod/typesafe-sdk-go
+```
+
+```go
+package main
+
+import (
+	"context"
+	"fmt"
+	"log"
+
+	typesafe "github.com/guchengod/typesafe-sdk-go"
+)
+
+func main() {
+	client, err := typesafe.NewClient()
+	if err != nil {
+		log.Fatal(err)
+	}
+	defer func() { _ = client.Close() }()
+
+	response, err := client.SystemOne(
+		context.Background(),
+		map[string]any{
+			"channel":  "email",
+			"document": "I was charged twice on invoice #4912. Please refund immediately.",
 		},
 		typesafe.Questions{
 			"billing": typesafe.NewNoul("Is this message about billing or payments?"),
@@ -77,7 +422,7 @@ func main() {
 				map[string]any{
 					"billing":   "Charges, refunds, or invoices",
 					"technical": "Bugs, crashes, or API problems",
-					"other":     nil, // nil means the label has no description
+					"other":     nil,
 				},
 				typesafe.WithInstructions("What department should handle this ticket?"),
 			),
@@ -93,181 +438,14 @@ func main() {
 
 	fmt.Printf("billing p(true) = %.2f\n", response.Nouls()["billing"].Noul)
 	fmt.Printf("category        = %s (confidence %.2f)\n", response.Choices()["category"].Choice, response.Choices()["category"].Confidence)
-	fmt.Printf("urgency         = %.2f of 2\n", response.Scores()["urgency"].Score)
+	fmt.Printf("urgency score   = %.2f of 2\n", response.Scores()["urgency"].Score)
 }
 ```
 
----
+### English Agent Prompt
 
-## Patterns & Model Guidance
+Add the [AI Agent 专用系统提示词](#-ai-agent-专用系统提示词) block above to your Cursor / Copilot / Claude Code rules file (`.cursorrules` or `CLAUDE.md`). It provides full specification details, constructors, and idiomatic Go usage patterns.
 
-TypeSafe's **Jev** is a calibrated System One model designed for fast, discrete qualitative decisions rather than continuous generation or arithmetic calculation. Keep determinism and arithmetic in Go code, and use Jev for structured judgments.
-
-### 1. Confidence-Gated Routing (置信度三段式路由)
-
-Every `Choice` and `Score` answer includes a `Confidence` score between `0.0` and `1.0`, derived from how probability mass concentrates across alternatives. Use confidence as an operational control axis — the thresholds below are an example, not an API-defined rule: the docs gate at `0.5` for a high-stakes decision ([confidence](https://docs.typesafe.ai/confidence)) and at `0.6` for a moderation queue ([confidence routing](https://docs.typesafe.ai/patterns/confidence-routing)).
-
-```go
-category := response.Choices()["category"]
-
-switch {
-case category.Confidence >= 0.85:
-	// High confidence: act automatically without human intervention
-	dispatchTicket(category.Choice)
-
-case category.Confidence >= 0.50:
-	// Medium confidence: proceed with caution, flag for confirmation
-	flagForOperatorReview(category.Choice)
-
-default:
-	// Low confidence: model is genuinely unsure ("I don't know"); route to human triage
-	routeToHumanTriage()
-}
-```
-
-### 2. Counting & Speculative Fan-Out (计数与投机性扇出)
-
-Jev is not an arithmetic calculator and does not count items reliably. When counting items that match a condition across a slice or list, **keep the arithmetic in Go**: fan out atomic `Noul` questions in a single `SystemOne` request, then sum the matching probabilities in code:
-
-```go
-items := []string{"urgent payment bug", "typo in docs", "security vulnerability"}
-
-questions := make(typesafe.Questions, len(items))
-for i, item := range items {
-	questions[fmt.Sprintf("item_%d", i)] = typesafe.NewNoul(
-		fmt.Sprintf("Does this issue describe a severe production or security incident: %q?", item),
-	)
-}
-
-// Jev ingests the state once and evaluates all questions in parallel
-resp, err := client.SystemOne(ctx, map[string]any{"items": items}, questions)
-if err != nil {
-	log.Fatal(err)
-}
-
-// Aggregate in Go code
-severeCount := 0
-for i := range items {
-	if resp.Nouls()[fmt.Sprintf("item_%d", i)].Noul >= 0.5 {
-		severeCount++
-	}
-}
-fmt.Printf("Severe issues: %d of %d\n", severeCount, len(items))
-```
-
-### 3. Score Rubric: Threshold Filtering vs Arithmetic (评分题准则)
-
-`ScoreAnswer.Score` is the probability-weighted average across discrete levels (`0` to `len(levels)-1`):
-- **Do:** Use `score` for threshold gating (e.g. `urgency.Score >= 1.5`).
-- **Don't:** Do not use `score` as a continuous linear interpolator to reconstruct exact numerical quantities between levels.
-- **Bounds:** Score rubrics require between **2 and 10 levels**. Choice questions accept up to **255 options**.
-
----
-
-## Command line
-
-The repository ships a CLI, built on the standard library only, for use without writing Go:
-
-```bash
-# Install the latest release into $(go env GOPATH)/bin
-go install github.com/guchengod/typesafe-sdk-go/cmd/typesafe@latest
-
-# Or download a binary for your platform
-# https://github.com/guchengod/typesafe-sdk-go/releases
-```
-
-```bash
-export TYPESAFE_API_KEY="ts_live_..."
-
-typesafe models --format text
-
-typesafe ask \
-  --state '{"body": "I was charged twice on invoice #4912."}' \
-  --noul 'billing=Is this about billing?' \
-  --choice 'queue=billing:Charges,technical:API issues,other' \
-  --score 'urgency=routine,elevated,critical' \
-  --format text
-```
-
-```text
-model    jev-1.13.0
-usage    Usage{input_tokens: 367, output_tokens: 69}
-billing  noul 0.9900
-queue    choice billing (confidence 1.00)
-urgency  score 0.53 of 2 (confidence 0.20)
-```
-
-`--format json` (the default) prints the API response, so it composes with `jq`:
-
-```bash
-curl -s https://example.test/ticket.json | typesafe ask --state - --questions questions.json | jq '.answers'
-```
-
-Exit codes tell a script what happened: `0` success, `1` usage error, `2` the API returned an
-error status, `3` the request never reached the API. See the
-[CLI guide](https://github.com/guchengod/typesafe-sdk-go/wiki/CLI) for every flag.
-
----
-
-## Documentation
-
-Full guides live in the [**wiki**](https://github.com/guchengod/typesafe-sdk-go/wiki):
-
-| Guide | Covers |
-| --- | --- |
-| [Use Cases](https://github.com/guchengod/typesafe-sdk-go/wiki/Use-Cases) | What people build with it, with a worked triage example |
-| [Questions](https://github.com/guchengod/typesafe-sdk-go/wiki/Questions) | The noul, choice, and score primitives, their options, and raw questions |
-| [Responses](https://github.com/guchengod/typesafe-sdk-go/wiki/Responses) | Response accessors and the decoding rules |
-| [Custom Response Models](https://github.com/guchengod/typesafe-sdk-go/wiki/Custom-Response-Models) | Decoding straight into your own struct with `SystemOneAs` |
-| [Configuration](https://github.com/guchengod/typesafe-sdk-go/wiki/Configuration) | Client options, environment variables, per-call options |
-| [Retry Policy](https://github.com/guchengod/typesafe-sdk-go/wiki/Retry-Policy) | Retries, backoff, retry hints, and the optional budget |
-| [Errors](https://github.com/guchengod/typesafe-sdk-go/wiki/Errors) | The typed error taxonomy and how to match it |
-| [Logging](https://github.com/guchengod/typesafe-sdk-go/wiki/Logging) | Structured logging and credential redaction |
-| [Security](https://github.com/guchengod/typesafe-sdk-go/wiki/Security) | Redaction, protected headers, redirects, bounded reads, TLS |
-| [Concurrency](https://github.com/guchengod/typesafe-sdk-go/wiki/Concurrency) | Sharing one client across goroutines |
-| [CLI](https://github.com/guchengod/typesafe-sdk-go/wiki/CLI) | The `typesafe` command: flags, output formats, exit codes |
-| [Examples](https://github.com/guchengod/typesafe-sdk-go/wiki/Examples) | Runnable programs in this repository |
-
-Also see:
-
-- [**API reference**](https://pkg.go.dev/github.com/guchengod/typesafe-sdk-go) — every exported type
-  and function.
-- [TypeSafe documentation](https://docs.typesafe.ai/) — what TypeSafe is and what it can do.
-
----
-
-## Examples
-
-| Example | Shows |
-| --- | --- |
-| [`examples/quickstart`](examples/quickstart/main.go) | One `SystemOne` call with all three primitives, printing every answer. |
-| [`examples/advanced`](examples/advanced/main.go) | `SystemOneAs` with a custom model, `Models.List`, per-call options, `WithExtraBody`, typed error handling, and a redacting logger. |
-
-```bash
-export TYPESAFE_API_KEY="ts_live_..."
-go run ./examples/quickstart
-go run ./examples/advanced
-```
-
----
-
-## Contributing
-
-Issues and pull requests are welcome at
-[github.com/guchengod/typesafe-sdk-go](https://github.com/guchengod/typesafe-sdk-go).
-
-```bash
-go build ./...
-go vet ./...
-go test ./...          # unit tests
-go test -run TestIntegration ./...   # live tests, need TYPESAFE_API_KEY
-go test -bench . -run XXX ./...      # benchmarks, no network
-golangci-lint run ./...              # linters
-go build ./cmd/typesafe              # the CLI
-```
-
----
-
-## License
+### License
 
 MIT License. See [LICENSE](LICENSE) for details.

@@ -98,6 +98,18 @@ func (c *Client) systemOne(ctx context.Context, state any, questions any, opts [
 		"model":     cmpOrString(options.model, c.config.DefaultModel),
 		"questions": normalized,
 	}
+	if options.assets == nil {
+		autoAssets := make(map[string]any)
+		collectImagesFrom(state, autoAssets)
+		if len(autoAssets) > 0 {
+			options.assets = autoAssets
+		}
+	} else {
+		collectImagesFrom(state, options.assets)
+	}
+	if len(options.assets) > 0 {
+		body["assets"] = options.assets
+	}
 	// extra_body is a shallow, last-write-wins overlay: a key that collides with state, model, or
 	// questions replaces it, and object values are replaced rather than merged.
 	for key, value := range options.extraBody {

@@ -98,6 +98,9 @@ func (c *Client) newRequest(method, path string, body any, options requestOption
 		timeout:     timeout,
 		headers:     options.extraHeaders,
 		retryPolicy: options.retryPolicy,
+		compression: options.compression,
+		longContext: options.longContext,
+		images:      options.images,
 	}, nil
 }
 
