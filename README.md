@@ -4,7 +4,7 @@
 [![Go Reference](https://pkg.go.dev/badge/github.com/guchengod/typesafe-sdk-go.svg)](https://pkg.go.dev/github.com/guchengod/typesafe-sdk-go)
 [![License: MIT](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 
-[**简体中文**](#typesafe-ai-go-sdk) | [**English**](#english-version)
+[English](README_EN.md) | **简体中文**
 
 ---
 
@@ -35,7 +35,8 @@
 - [🤖 AI Agent 专用系统提示词](#-ai-agent-专用系统提示词)
 - [命令行工具 (CLI)](#命令行工具-cli)
 - [错误处理](#错误处理)
-- [English Version](#english-version)
+- [文档与示例](#文档与示例)
+- [许可证](#许可证)
 
 ---
 
@@ -365,87 +366,30 @@ if err != nil {
 ```
 
 ---
+
+## 文档与示例
+
+- [**Wiki 详细文档**](https://github.com/guchengod/typesafe-sdk-go/wiki) — 包含详细的配置、重试策略、并发安全及日志记录指南。
+- [**Go Doc API 文档**](https://pkg.go.dev/github.com/guchengod/typesafe-sdk-go) — 完整的包接口定义与方法签名。
+- [`examples/quickstart`](examples/quickstart/main.go) — 快速上手代码示例。
+- [`examples/advanced`](examples/advanced/main.go) — 包含自定义模型反序列化、调用选项与类型错误处理的高级示例。
+
 ---
 
-## English Version
+## 参与贡献
 
-Go SDK for [TypeSafe AI](https://typesafe.ai) — calibrated, deterministic System One evaluation models designed for classification, qualitative grading, verification, and bounding box object localization over text, structured JSON, and images.
-
-Ask dozens of questions in a single parallel call and receive calibrated probabilities, categorical labels, scores, and bounding box coordinates rather than unstructured LLM text that requires fragile parsing.
-
-### Highlights
-
-- **Standard Library Only**: Pure Go using `net/http`, `encoding/json`, and `log/slog`. Zero external dependencies.
-- **Concurrency-Safe**: Client instances are stateless across calls and share HTTP connection pools. All methods accept `context.Context`.
-- **Automatic Gzip Compression**: Transparently compresses request bodies $\ge 1\text{ KiB}$ with standard gzip.
-- **Multimodal & Object Localization**: First-class support for `Image` assets and `Box` bounding box question primitives.
-- **Resilient Retries**: Exponential backoff with jitter, honoring upstream `Retry-After` response headers.
-- **Strongly Typed**: Typed error taxonomy (`errors.As`), typed responses, and `SystemOneAs[T]` for custom struct decoding.
-- **Built-in CLI**: `cmd/typesafe` for pipelines, shell scripts, and terminal inspection.
-
-Requires **Go 1.26 or newer**.
-
-### English Quickstart
+欢迎通过 [GitHub Issues 与 Pull Requests](https://github.com/guchengod/typesafe-sdk-go) 参与建设：
 
 ```bash
-export TYPESAFE_API_KEY="ts_live_..."
-go get github.com/guchengod/typesafe-sdk-go
+go build ./...
+go vet ./...
+go test ./...                        # 运行单元测试
+go test -run TestIntegration ./...   # 运行集成测试（需要设置 TYPESAFE_API_KEY）
+go test -bench . -run XXX ./...      # 运行性能基准测试
 ```
 
-```go
-package main
+---
 
-import (
-	"context"
-	"fmt"
-	"log"
+## 许可证
 
-	typesafe "github.com/guchengod/typesafe-sdk-go"
-)
-
-func main() {
-	client, err := typesafe.NewClient()
-	if err != nil {
-		log.Fatal(err)
-	}
-	defer func() { _ = client.Close() }()
-
-	response, err := client.SystemOne(
-		context.Background(),
-		map[string]any{
-			"channel":  "email",
-			"document": "I was charged twice on invoice #4912. Please refund immediately.",
-		},
-		typesafe.Questions{
-			"billing": typesafe.NewNoul("Is this message about billing or payments?"),
-			"category": typesafe.NewChoice(
-				map[string]any{
-					"billing":   "Charges, refunds, or invoices",
-					"technical": "Bugs, crashes, or API problems",
-					"other":     nil,
-				},
-				typesafe.WithInstructions("What department should handle this ticket?"),
-			),
-			"urgency": typesafe.NewScore(
-				[]any{"Can wait until next week", "Needs attention within 48 hours", "Requires same-day attention"},
-				typesafe.WithInstructions("How urgently does this customer require a response?"),
-			),
-		},
-	)
-	if err != nil {
-		log.Fatal(err)
-	}
-
-	fmt.Printf("billing p(true) = %.2f\n", response.Nouls()["billing"].Noul)
-	fmt.Printf("category        = %s (confidence %.2f)\n", response.Choices()["category"].Choice, response.Choices()["category"].Confidence)
-	fmt.Printf("urgency score   = %.2f of 2\n", response.Scores()["urgency"].Score)
-}
-```
-
-### English Agent Prompt
-
-Add the [AI Agent 专用系统提示词](#-ai-agent-专用系统提示词) block above to your Cursor / Copilot / Claude Code rules file (`.cursorrules` or `CLAUDE.md`). It provides full specification details, constructors, and idiomatic Go usage patterns.
-
-### License
-
-MIT License. See [LICENSE](LICENSE) for details.
+基于 [MIT 许可证](LICENSE) 开源。
