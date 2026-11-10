@@ -20,7 +20,7 @@ Ask dozens of questions in a single parallel call and receive calibrated probabi
 - **Strongly Typed**: Typed error taxonomy (`errors.As`), typed responses, and `SystemOneAs[T]` for custom struct decoding.
 - **Built-in CLI**: `cmd/typesafe` for pipelines, shell scripts, and terminal inspection.
 
-> Requires **Go 1.26 or newer**.
+> Requires **Go 1.27.3 or newer**.
 
 ---
 
@@ -132,7 +132,7 @@ TypeSafe provides four atomic question types for deterministic decision-making:
 
 TypeSafe supports embedding images in `state`, instructions, or criteria, as well as locating visual elements with the `Box` question type.
 
-> Image support and Box questions require the `jev-preview` model and the `TypeSafe-Danger-Zone-Images: true` header (enabled via `typesafe.WithImages(true)` on client configuration or `typesafe.WithCallImages(true)` per call).
+> Box questions require a Jev 1.14 model (`jev-latest`, the default, already points to `jev-1.14.0`). When a request carries image assets, the SDK sends the `TypeSafe-Danger-Zone-Images: true` header automatically; `typesafe.WithImages(true)` on client configuration or `typesafe.WithCallImages(true)` per call controls it explicitly.
 
 ```go
 package main
@@ -166,7 +166,6 @@ func main() {
 			"has_cup": typesafe.NewNoul("Is there a coffee mug in `photo`?"),
 			"cup_box": typesafe.NewBox("the coffee mug in `photo`"),
 		},
-		typesafe.WithModel(typesafe.ModelJevPreview),
 	)
 	if err != nil {
 		log.Fatal(err)

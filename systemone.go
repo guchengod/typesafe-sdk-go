@@ -2,7 +2,8 @@ package typesafe
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"net/http"
@@ -35,9 +36,14 @@ import (
 // Keep state focused on the relevant context to avoid distractor noise. Questions accepts
 // [Questions], map[string]Question, or map[string]any.
 //
+// Images are collected automatically wherever they appear: in state, a question's instructions, or
+// a question's criteria. A request carrying at least one image also sends the
+// TypeSafe-Danger-Zone-Images header, unless the call disables it with [WithCallImages].
+//
 // Errors are typed: [SDKError] for invalid input, [APIError] and its status-specific subclasses
 // ([BadRequestError], [AuthenticationError], [PermissionDeniedError], [NotFoundError],
-// [UnprocessableEntityError], [RateLimitError], [OverloadedError], [InternalServerError])
+// [UnprocessableEntityError], [PayloadTooLargeError], [UnsupportedMediaTypeError], [RateLimitError],
+// [OverloadedError], [InternalServerError])
 // for unsuccessful responses, [APIConnectionError] and [APITimeoutError] for transport failures,
 // and [APIResponseValidationError] for a success response that could not be decoded.
 func (c *Client) SystemOne(ctx context.Context, state any, questions any, opts ...RequestOption) (*SystemOneResponse, error) {
@@ -98,22 +104,28 @@ func (c *Client) systemOne(ctx context.Context, state any, questions any, opts [
 		"model":     cmpOrString(options.model, c.config.DefaultModel),
 		"questions": normalized,
 	}
-	if options.assets == nil {
-		autoAssets := make(map[string]any)
-		collectImagesFrom(state, autoAssets)
-		if len(autoAssets) > 0 {
-			options.assets = autoAssets
-		}
-	} else {
-		collectImagesFrom(state, options.assets)
-	}
-	if len(options.assets) > 0 {
-		body["assets"] = options.assets
-	}
 	// extra_body is a shallow, last-write-wins overlay: a key that collides with state, model, or
-	// questions replaces it, and object values are replaced rather than merged.
+	// questions replaces it, and object values are replaced rather than merged. It is applied before
+	// images are collected so the assets match the body that is actually sent.
 	for key, value := range options.extraBody {
 		body[key] = value
+	}
+	// Images may appear in state, instructions, or criteria, so the final state and questions are
+	// scanned. An image the caller passes explicitly through WithAssets is merged with the ones
+	// discovered here.
+	assets := options.assets
+	if assets == nil {
+		assets = make(map[string]any)
+	}
+	collectImagesFrom(body["state"], assets)
+	collectImagesFrom(body["questions"], assets)
+	if _, overridden := body["assets"]; !overridden && len(assets) > 0 {
+		body["assets"] = assets
+	}
+	// The images header is required for any request carrying image assets. Enable it for this call
+	// unless the caller explicitly disabled it.
+	if options.images == nil && body["assets"] != nil {
+		options.images = new(true)
 	}
 
 	req, err := c.newRequest(http.MethodPost, SystemOnePath, body, options)
@@ -149,27 +161,27 @@ func askedQuestionNames(sent any, built map[string]any) []string {
 
 // liftAnswers rebuilds the response document so that every modeled answer is also available as a
 // top-level key, and unknown answer types are excluded from the decoded view.
-func liftAnswers(body []byte, parsed *SystemOneResponse) (map[string]json.RawMessage, error) {
-	var document map[string]json.RawMessage
-	if err := json.Unmarshal(body, &document); err != nil {
+func liftAnswers(body []byte, parsed *SystemOneResponse) (map[string]jsontext.Value, error) {
+	var document map[string]jsontext.Value
+	if err := jsonv2.Unmarshal(body, &document, unmarshalOptions); err != nil {
 		return nil, &SDKError{Message: "The response body could not be decoded as JSON", Cause: err}
 	}
 	encoded, ok := document["answers"]
 	if !ok {
 		return document, nil
 	}
-	var entries map[string]json.RawMessage
-	if err := json.Unmarshal(encoded, &entries); err != nil {
+	var entries map[string]jsontext.Value
+	if err := jsonv2.Unmarshal(encoded, &entries, unmarshalOptions); err != nil {
 		return document, nil
 	}
-	modeled := make(map[string]json.RawMessage, len(parsed.Answers))
+	modeled := make(map[string]jsontext.Value, len(parsed.Answers))
 	for name := range parsed.Answers {
 		if entry, ok := entries[name]; ok {
 			modeled[name] = entry
 		}
 	}
 	if len(modeled) != len(entries) {
-		if answers, err := json.Marshal(modeled); err == nil {
+		if answers, err := jsonv2.Marshal(modeled, marshalOptions); err == nil {
 			document["answers"] = answers
 		}
 	}
@@ -184,13 +196,13 @@ func liftAnswers(body []byte, parsed *SystemOneResponse) (map[string]json.RawMes
 
 // decodeResponse decodes the lifted document into T, reporting the dotted path of the first
 // field that is missing or has the wrong shape.
-func decodeResponse[T any](document map[string]json.RawMessage, resp *response) (*T, error) {
-	encoded, err := json.Marshal(document)
+func decodeResponse[T any](document map[string]jsontext.Value, resp *response) (*T, error) {
+	encoded, err := jsonv2.Marshal(document, marshalOptions)
 	if err != nil {
 		return nil, &SDKError{Message: "The response body could not be re-encoded as JSON", Cause: err}
 	}
 	var target T
-	if err := json.Unmarshal(encoded, &target); err != nil {
+	if err := jsonv2.Unmarshal(encoded, &target, unmarshalOptions); err != nil {
 		if answerErr, ok := errors.AsType[*answerDecodeError](err); ok {
 			return nil, newValidationError(resp, answerErr.path)
 		}
@@ -203,10 +215,10 @@ func decodeResponse[T any](document map[string]json.RawMessage, resp *response) 
 }
 
 // decodeFieldPath renders the field path reported by a JSON decode failure, keeping the SDK's
-// dotted convention.
+// dotted convention. The v2 decoder reports the offending location as a JSON Pointer.
 func decodeFieldPath(err error) string {
-	if typeErr, ok := errors.AsType[*json.UnmarshalTypeError](err); ok {
-		return typeErr.Field
+	if semantic, ok := errors.AsType[*jsonv2.SemanticError](err); ok {
+		return jsonPointerPath(semantic.JSONPointer)
 	}
 	return ""
 }

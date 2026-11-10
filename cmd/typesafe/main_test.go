@@ -3,7 +3,7 @@ package main
 import (
 	"bytes"
 	"context"
-	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"fmt"
 	"io"
 	"net/http"
@@ -89,7 +89,7 @@ func newCLIAPI(t *testing.T, respond func(w http.ResponseWriter, r *http.Request
 			body, _ := io.ReadAll(r.Body)
 			if len(body) > 0 {
 				var decoded map[string]any
-				_ = json.Unmarshal(body, &decoded)
+				_ = jsonv2.Unmarshal(body, &decoded)
 				api.requests = append(api.requests, decoded)
 			}
 		}
@@ -256,7 +256,7 @@ func TestAskSendsQuestionsAndDecodesAnswers(t *testing.T) {
 	}
 
 	var decoded map[string]any
-	if err := json.Unmarshal([]byte(result.stdout), &decoded); err != nil {
+	if err := jsonv2.Unmarshal([]byte(result.stdout), &decoded); err != nil {
 		t.Fatalf("stdout is not JSON: %v (%s)", err, result.stdout)
 	}
 	if decoded["model"] != "jev-latest" {
@@ -371,7 +371,7 @@ func TestAskTextFormat(t *testing.T) {
 		}
 	}
 	var decoded map[string]any
-	if err := json.Unmarshal([]byte(result.stdout), &decoded); err == nil {
+	if err := jsonv2.Unmarshal([]byte(result.stdout), &decoded); err == nil {
 		t.Errorf("text output parsed as JSON = %q, want a human-readable summary", result.stdout)
 	}
 }
@@ -423,7 +423,7 @@ func TestModelsJSONAndText(t *testing.T) {
 			Name string `json:"name"`
 		} `json:"models"`
 	}
-	if err := json.Unmarshal([]byte(result.stdout), &decoded); err != nil {
+	if err := jsonv2.Unmarshal([]byte(result.stdout), &decoded); err != nil {
 		t.Fatalf("stdout is not JSON: %v (%s)", err, result.stdout)
 	}
 	if len(decoded.Models) != 1 || decoded.Models[0].Name != "jev-latest" {

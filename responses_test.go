@@ -2,7 +2,8 @@ package typesafe
 
 import (
 	"bytes"
-	"encoding/json"
+	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"net/http"
@@ -32,7 +33,7 @@ func responseTestJSONClient(t *testing.T, body, requestID string, opts ...Option
 func responseTestDecode(t *testing.T, body string) any {
 	t.Helper()
 	var decoded any
-	if err := json.Unmarshal([]byte(body), &decoded); err != nil {
+	if err := jsonv2.Unmarshal([]byte(body), &decoded); err != nil {
 		t.Fatalf("test body is not valid JSON: %v (body=%q)", err, body)
 	}
 	return decoded
@@ -62,7 +63,7 @@ func responseTestAssertValidationError(t *testing.T, err error, endpoint, path, 
 		t.Errorf("RawBody = %q, want %q", validationErr.RawBody, body)
 	}
 	var decoded any
-	if err := json.Unmarshal([]byte(body), &decoded); err != nil {
+	if err := jsonv2.Unmarshal([]byte(body), &decoded); err != nil {
 		decoded = body
 	}
 	if !reflect.DeepEqual(validationErr.Body, decoded) {
@@ -383,11 +384,11 @@ func TestSystemOneResponseMalformedPayloads(t *testing.T) {
 func questionsCovering(t *testing.T, body string) Questions {
 	t.Helper()
 	var document struct {
-		Answers map[string]json.RawMessage `json:"answers"`
+		Answers map[string]jsontext.Value `json:"answers"`
 	}
 	// An answers value that is not an object yields no ids; the placeholder question below still
 	// reaches the field under test, because the SDK rejects the whole answers value first.
-	_ = json.Unmarshal([]byte(body), &document)
+	_ = jsonv2.Unmarshal([]byte(body), &document)
 	questions := make(Questions, len(document.Answers))
 	for name := range document.Answers {
 		questions[name] = NewNoul("Placeholder?")
@@ -516,7 +517,7 @@ func TestSystemOneResponseDropsUnknownAnswerType(t *testing.T) {
 			Type string `json:"type"`
 		} `json:"answers"`
 	}
-	if err := json.Unmarshal(response.RawBody(), &raw); err != nil {
+	if err := jsonv2.Unmarshal(response.RawBody(), &raw); err != nil {
 		t.Fatalf("RawBody() is not decodable: %v", err)
 	}
 	if got := raw.Answers["mystery"].Type; got != "aurora" {
@@ -551,9 +552,9 @@ func TestSystemOneResponseToleratesUnknownFields(t *testing.T) {
 	if response.Usage.InputTokens != 1 || response.Usage.OutputTokens != 1 {
 		t.Errorf("Usage = %+v, want 1 input and 1 output token", response.Usage)
 	}
-	encoded, err := json.Marshal(response.Usage)
+	encoded, err := jsonv2.Marshal(response.Usage, marshalOptions)
 	if err != nil {
-		t.Fatalf("json.Marshal(Usage) error = %v", err)
+		t.Fatalf("jsonv2.Marshal(Usage) error = %v", err)
 	}
 	if got, want := string(encoded), `{"input_tokens":1,"output_tokens":1}`; got != want {
 		t.Errorf("Usage JSON = %s, want %s", got, want)
@@ -595,12 +596,12 @@ func TestSystemOneResponsePreservesNestedLegendJSON(t *testing.T) {
 		t.Errorf("Probabilities = %#v, want %#v", answer.Probabilities, map[int]float64{0: 1.0})
 	}
 
-	encoded, err := json.Marshal(answer)
+	encoded, err := jsonv2.Marshal(answer, marshalOptions)
 	if err != nil {
-		t.Fatalf("json.Marshal(ScoreAnswer) error = %v", err)
+		t.Fatalf("jsonv2.Marshal(ScoreAnswer) error = %v", err)
 	}
 	var restored ScoreAnswer
-	if err := json.Unmarshal(encoded, &restored); err != nil {
+	if err := jsonv2.Unmarshal(encoded, &restored); err != nil {
 		t.Fatalf("round-tripped score answer is not decodable: %v", err)
 	}
 	if !reflect.DeepEqual(restored.Legend, want) {
@@ -666,13 +667,13 @@ func TestSystemOneResponseMarshalJSONEncodesOnlyThePayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("SystemOne() error = %v", err)
 	}
-	encoded, err := json.Marshal(response)
+	encoded, err := jsonv2.Marshal(response, marshalOptions)
 	if err != nil {
-		t.Fatalf("json.Marshal(SystemOneResponse) error = %v", err)
+		t.Fatalf("jsonv2.Marshal(SystemOneResponse) error = %v", err)
 	}
 
 	var payload map[string]any
-	if err := json.Unmarshal(encoded, &payload); err != nil {
+	if err := jsonv2.Unmarshal(encoded, &payload); err != nil {
 		t.Fatalf("marshaled response is not a JSON object: %v", err)
 	}
 	for _, key := range []string{"model", "usage", "answers"} {
@@ -698,32 +699,32 @@ func TestSystemOneResponseMarshalJSONEncodesOnlyThePayload(t *testing.T) {
 
 	// Round-tripping the payload yields the same typed field values.
 	var restored struct {
-		Model   string                     `json:"model"`
-		Usage   Usage                      `json:"usage"`
-		Answers map[string]json.RawMessage `json:"answers"`
+		Model   string                    `json:"model"`
+		Usage   Usage                     `json:"usage"`
+		Answers map[string]jsontext.Value `json:"answers"`
 	}
-	if err := json.Unmarshal(encoded, &restored); err != nil {
+	if err := jsonv2.Unmarshal(encoded, &restored); err != nil {
 		t.Fatalf("marshaled response is not decodable: %v", err)
 	}
 	if restored.Model != response.Model || !reflect.DeepEqual(restored.Usage, response.Usage) {
 		t.Errorf("round-tripped envelope = %+v, want model %q and %+v", restored, response.Model, response.Usage)
 	}
 	var restoredBilling NoulAnswer
-	if err := json.Unmarshal(restored.Answers["billing"], &restoredBilling); err != nil {
+	if err := jsonv2.Unmarshal(restored.Answers["billing"], &restoredBilling); err != nil {
 		t.Fatalf("round-tripped billing answer is not decodable: %v", err)
 	}
 	if !reflect.DeepEqual(&restoredBilling, billing) {
 		t.Errorf("round-tripped billing = %+v, want %+v", &restoredBilling, billing)
 	}
 	var restoredTone ChoiceAnswer
-	if err := json.Unmarshal(restored.Answers["tone"], &restoredTone); err != nil {
+	if err := jsonv2.Unmarshal(restored.Answers["tone"], &restoredTone); err != nil {
 		t.Fatalf("round-tripped tone answer is not decodable: %v", err)
 	}
 	if !reflect.DeepEqual(&restoredTone, tone) {
 		t.Errorf("round-tripped tone = %+v, want %+v", &restoredTone, tone)
 	}
 	var restoredUrgency ScoreAnswer
-	if err := json.Unmarshal(restored.Answers["urgency"], &restoredUrgency); err != nil {
+	if err := jsonv2.Unmarshal(restored.Answers["urgency"], &restoredUrgency); err != nil {
 		t.Fatalf("round-tripped urgency answer is not decodable: %v", err)
 	}
 	if !reflect.DeepEqual(&restoredUrgency, urgency) {
@@ -739,9 +740,9 @@ func TestScoreAnswerMarshalJSONEncodesLevelsAsObjectKeys(t *testing.T) {
 		Legend:        map[string]any{"0": "can wait", "1": "this week", "2": "today"},
 		Probabilities: map[int]float64{0: 0.1, 1: 0.1, 2: 0.8},
 	}
-	encoded, err := json.Marshal(answer)
+	encoded, err := jsonv2.Marshal(answer, marshalOptions)
 	if err != nil {
-		t.Fatalf("json.Marshal(ScoreAnswer) error = %v", err)
+		t.Fatalf("jsonv2.Marshal(ScoreAnswer) error = %v", err)
 	}
 	want := map[string]any{
 		"type":          "score",
@@ -755,17 +756,17 @@ func TestScoreAnswerMarshalJSONEncodesLevelsAsObjectKeys(t *testing.T) {
 	}
 
 	var restored ScoreAnswer
-	if err := json.Unmarshal(encoded, &restored); err != nil {
-		t.Fatalf("json.Unmarshal(ScoreAnswer) error = %v", err)
+	if err := jsonv2.Unmarshal(encoded, &restored); err != nil {
+		t.Fatalf("jsonv2.Unmarshal(ScoreAnswer) error = %v", err)
 	}
 	if !reflect.DeepEqual(&restored, answer) {
 		t.Errorf("round-tripped score answer = %+v, want %+v", &restored, answer)
 	}
 
 	// A score answer without rubric entries keeps the keys, encoded as null.
-	empty, err := json.Marshal(&ScoreAnswer{Type: "score"})
+	empty, err := jsonv2.Marshal(&ScoreAnswer{Type: "score"}, marshalOptions)
 	if err != nil {
-		t.Fatalf("json.Marshal(empty ScoreAnswer) error = %v", err)
+		t.Fatalf("jsonv2.Marshal(empty ScoreAnswer) error = %v", err)
 	}
 	wantEmpty := map[string]any{
 		"type":          "score",
@@ -831,11 +832,11 @@ func TestListModelsResponseMalformedPayloads(t *testing.T) {
 	)
 	without := func(missing string) string {
 		var fields map[string]any
-		if err := json.Unmarshal([]byte(full), &fields); err != nil {
+		if err := jsonv2.Unmarshal([]byte(full), &fields); err != nil {
 			t.Fatalf("test fixture is not decodable: %v", err)
 		}
 		delete(fields, missing)
-		encoded, err := json.Marshal(fields)
+		encoded, err := jsonv2.Marshal(fields, marshalOptions)
 		if err != nil {
 			t.Fatalf("test fixture is not encodable: %v", err)
 		}
@@ -880,13 +881,13 @@ func TestListModelsResponseMarshalJSONEncodesOnlyThePayload(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Models.List() error = %v", err)
 	}
-	encoded, err := json.Marshal(response)
+	encoded, err := jsonv2.Marshal(response, marshalOptions)
 	if err != nil {
-		t.Fatalf("json.Marshal(ListModelsResponse) error = %v", err)
+		t.Fatalf("jsonv2.Marshal(ListModelsResponse) error = %v", err)
 	}
 
 	var payload map[string]any
-	if err := json.Unmarshal(encoded, &payload); err != nil {
+	if err := jsonv2.Unmarshal(encoded, &payload); err != nil {
 		t.Fatalf("marshaled response is not a JSON object: %v", err)
 	}
 	if len(payload) != 1 {
@@ -897,15 +898,15 @@ func TestListModelsResponseMarshalJSONEncodesOnlyThePayload(t *testing.T) {
 	}
 
 	var restored ListModelsResponse
-	if err := json.Unmarshal(encoded, &restored); err != nil {
-		t.Fatalf("json.Unmarshal(ListModelsResponse) error = %v", err)
+	if err := jsonv2.Unmarshal(encoded, &restored); err != nil {
+		t.Fatalf("jsonv2.Unmarshal(ListModelsResponse) error = %v", err)
 	}
 	if !reflect.DeepEqual(restored.Models, response.Models) {
 		t.Errorf("round-tripped models = %+v, want %+v", restored.Models, response.Models)
 	}
-	reencoded, err := json.Marshal(&restored)
+	reencoded, err := jsonv2.Marshal(&restored, marshalOptions)
 	if err != nil {
-		t.Fatalf("json.Marshal(restored) error = %v", err)
+		t.Fatalf("jsonv2.Marshal(restored) error = %v", err)
 	}
 	if !bytes.Equal(reencoded, encoded) {
 		t.Errorf("re-encoded response = %s, want %s", reencoded, encoded)
@@ -984,9 +985,9 @@ type responseTestBillingNoul struct {
 
 // responseTestUnknownAnswers declares a field for an answer type this SDK version does not model.
 type responseTestUnknownAnswers struct {
-	Spam    NoulAnswer                 `json:"spam"`
-	Mystery json.RawMessage            `json:"mystery"`
-	Answers map[string]json.RawMessage `json:"answers"`
+	Spam    NoulAnswer                `json:"spam"`
+	Mystery jsontext.Value            `json:"mystery"`
+	Answers map[string]jsontext.Value `json:"answers"`
 }
 
 func TestSystemOneAsLiftsAnswersOntoCustomStruct(t *testing.T) {
@@ -1059,6 +1060,33 @@ func TestSystemOneAsOptionalFieldsMayBeAbsent(t *testing.T) {
 	}
 	if result.Spare != "" {
 		t.Errorf("Spare = %q, want the empty string", result.Spare)
+	}
+}
+
+// TestSystemOneAsMatchesFieldNamesCaseInsensitively locks the v1-compatible name matching that
+// unmarshalOptions enables: a tag that differs only in case from the wire name still populates.
+func TestSystemOneAsMatchesFieldNamesCaseInsensitively(t *testing.T) {
+	t.Parallel()
+
+	const body = `{
+		"model": "jev-1.14.0",
+		"usage": {"input_tokens": 10, "output_tokens": 2},
+		"note": "matched",
+		"answers": {"q": {"type": "noul", "noul": 0.9}}
+	}`
+	type result struct {
+		Model string     `json:"model"`
+		Note  *string    `json:"NOTE"`
+		Q     NoulAnswer `json:"q"`
+	}
+	client := responseTestJSONClient(t, body, "req-case")
+
+	got, err := SystemOneAs[result](t.Context(), client, "state", Questions{"q": NewNoul("Is this true?")})
+	if err != nil {
+		t.Fatalf("SystemOneAs failed: %v", err)
+	}
+	if got.Note == nil || *got.Note != "matched" {
+		t.Errorf("Note = %v, want matched", got.Note)
 	}
 }
 
@@ -1218,7 +1246,7 @@ func TestSystemOneAsSendsSameRequestAsSystemOne(t *testing.T) {
 func TestAnswersDecodesByDiscriminator(t *testing.T) {
 	var decoded Answers
 	body := `{"billing":{"type":"noul","noul":0.98},"tone":{"type":"choice","choice":"angry","confidence":0.9,"probabilities":{"angry":0.9,"calm":0.1}},"urgency":{"type":"score","score":1.7,"confidence":0.8,"legend":{"0":"can wait"},"probabilities":{"0":1}}}`
-	if err := json.Unmarshal([]byte(body), &decoded); err != nil {
+	if err := jsonv2.Unmarshal([]byte(body), &decoded); err != nil {
 		t.Fatalf("Unmarshal() error = %v", err)
 	}
 	if len(decoded) != 3 {
@@ -1253,7 +1281,7 @@ func TestAnswersRejectsMalformedInput(t *testing.T) {
 	} {
 		t.Run(testCase.name, func(t *testing.T) {
 			var decoded Answers
-			err := json.Unmarshal([]byte(testCase.body), &decoded)
+			err := jsonv2.Unmarshal([]byte(testCase.body), &decoded)
 			if err == nil {
 				t.Fatalf("Unmarshal(%s) = %#v, want an error", testCase.body, decoded)
 			}

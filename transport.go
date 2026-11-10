@@ -5,7 +5,7 @@ import (
 	"compress/gzip"
 	"context"
 	"crypto/tls"
-	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -81,7 +81,7 @@ func execute(ctx context.Context, config *Config, httpClient *http.Client, req r
 	var logBody []byte
 	var isCompressed bool
 	if req.body != nil {
-		encoded, err := json.Marshal(req.body)
+		encoded, err := jsonv2.Marshal(req.body, marshalOptions)
 		if err != nil {
 			return nil, &SDKError{Message: "The request body could not be encoded as JSON", Cause: err}
 		}

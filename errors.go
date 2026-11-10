@@ -2,7 +2,7 @@ package typesafe
 
 import (
 	"cmp"
-	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"math"
@@ -132,7 +132,7 @@ func rawBodyString(body any, raw []byte) string {
 	if len(raw) > 0 {
 		return string(raw)
 	}
-	encoded, err := json.Marshal(body)
+	encoded, err := jsonv2.Marshal(body, marshalOptions)
 	if err != nil {
 		return fmt.Sprintf("%v", body)
 	}
@@ -556,7 +556,7 @@ func decodeErrorBody(raw []byte) any {
 		return nil
 	}
 	var decoded any
-	if err := json.Unmarshal(raw, &decoded); err != nil {
+	if err := jsonv2.Unmarshal(raw, &decoded, unmarshalOptions); err != nil {
 		return string(raw)
 	}
 	return decoded

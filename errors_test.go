@@ -1,7 +1,7 @@
 package typesafe
 
 import (
-	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"net/http"
@@ -340,7 +340,7 @@ func TestAPIErrorTruncationOnlyAppliesToRawBodyFallback(t *testing.T) {
 	t.Run("extracted message is never truncated", func(t *testing.T) {
 		t.Parallel()
 		message := strings.Repeat("m", 500)
-		raw, err := json.Marshal(errorsTestMessageBody(message))
+		raw, err := jsonv2.Marshal(errorsTestMessageBody(message), marshalOptions)
 		if err != nil {
 			t.Fatalf("marshal: %v", err)
 		}

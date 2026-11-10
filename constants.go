@@ -30,10 +30,11 @@ const (
 	// DefaultModel is the default model name.
 	DefaultModel = "jev-latest"
 
-	// ModelJevLatest is the alias for the latest stable model release (currently jev-1.13.0).
+	// ModelJevLatest is the alias for the latest stable model release (currently jev-1.14.0).
 	ModelJevLatest = "jev-latest"
 
-	// ModelJevPreview is the alias for the latest preview release (currently jev-1.14.0).
+	// ModelJevPreview is the alias for the latest release, official or not (currently jev-1.14.0).
+	// It can move ahead of ModelJevLatest when a preview build ships.
 	ModelJevPreview = "jev-preview"
 
 	// ModelJev114 is the versioned ID for Jev 1.14.
@@ -49,7 +50,7 @@ const (
 	SDKName = "typesafe-sdk-go"
 
 	// SDKVersion is the current version of this SDK.
-	SDKVersion = "0.13.0"
+	SDKVersion = "0.14.0"
 
 	// MaxErrorBodyLength limits the raw error body length included in error messages.
 	MaxErrorBodyLength = 200

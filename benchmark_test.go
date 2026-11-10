@@ -13,7 +13,8 @@ package typesafe
 // number as a regression to explain, not an automatic failure.
 
 import (
-	"encoding/json"
+	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
 	"fmt"
 	"io"
 	"log/slog"
@@ -82,9 +83,9 @@ func benchmarkMockClient(b *testing.B, body string) (*Client, *mockTransport) {
 func benchmarkAnswerIDs(b *testing.B, body string) []string {
 	b.Helper()
 	var document struct {
-		Answers map[string]json.RawMessage `json:"answers"`
+		Answers map[string]jsontext.Value `json:"answers"`
 	}
-	if err := json.Unmarshal([]byte(body), &document); err != nil {
+	if err := jsonv2.Unmarshal([]byte(body), &document); err != nil {
 		b.Fatalf("benchmark payload is not valid JSON: %v", err)
 	}
 	names := make([]string, 0, len(document.Answers))
@@ -135,9 +136,9 @@ func BenchmarkQuestionsEncode(b *testing.B) {
 	if err != nil {
 		b.Fatalf("NormalizeQuestions() error = %v", err)
 	}
-	encoded, err := json.Marshal(normalized)
+	encoded, err := jsonv2.Marshal(normalized, marshalOptions)
 	if err != nil {
-		b.Fatalf("json.Marshal() error = %v", err)
+		b.Fatalf("jsonv2.Marshal() error = %v", err)
 	}
 	b.ReportAllocs()
 	b.SetBytes(int64(len(encoded)))
@@ -146,9 +147,9 @@ func BenchmarkQuestionsEncode(b *testing.B) {
 		if err != nil {
 			b.Fatalf("NormalizeQuestions() error = %v", err)
 		}
-		encoded, err := json.Marshal(normalized)
+		encoded, err := jsonv2.Marshal(normalized, marshalOptions)
 		if err != nil {
-			b.Fatalf("json.Marshal() error = %v", err)
+			b.Fatalf("jsonv2.Marshal() error = %v", err)
 		}
 		benchSinkBytes = encoded
 	}
@@ -281,7 +282,7 @@ func ExampleWithNoulCriteria() {
 		True:  "Unsolicited advertising",
 		False: "A legitimate conversation",
 	}))
-	encoded, err := json.Marshal(question)
+	encoded, err := jsonv2.Marshal(question, marshalOptions)
 	if err != nil {
 		panic(err)
 	}
@@ -294,7 +295,7 @@ func ExampleNewChoice() {
 		map[string]any{"calm": nil, "angry": "An upset or hostile message"},
 		WithInstructions("What is the tone of this message?"),
 	)
-	encoded, err := json.Marshal(question)
+	encoded, err := jsonv2.Marshal(question, marshalOptions)
 	if err != nil {
 		panic(err)
 	}
@@ -307,7 +308,7 @@ func ExampleNewScore() {
 		[]any{"can wait", "needs attention this week", "needs attention today"},
 		WithInstructions("How urgent is this message?"),
 	)
-	encoded, err := json.Marshal(question)
+	encoded, err := jsonv2.Marshal(question, marshalOptions)
 	if err != nil {
 		panic(err)
 	}
@@ -317,7 +318,7 @@ func ExampleNewScore() {
 
 func ExampleWithQuestionField() {
 	question := NewNoul("Is this message about billing?", WithQuestionField("language", "en"))
-	encoded, err := json.Marshal(question)
+	encoded, err := jsonv2.Marshal(question, marshalOptions)
 	if err != nil {
 		panic(err)
 	}

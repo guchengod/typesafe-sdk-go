@@ -80,6 +80,7 @@ func WithLongContext(enabled bool) Option {
 }
 
 // WithImages sets whether to send TypeSafe-Danger-Zone-Images: true with every request.
+// A request carrying image assets sends the header automatically; pass false to suppress it.
 func WithImages(enabled bool) Option {
 	return func(o *configOptions) { o.images = new(enabled) }
 }
@@ -217,7 +218,8 @@ func WithCallLongContext(enabled bool) RequestOption {
 	return func(o *requestOptions) { o.longContext = new(enabled) }
 }
 
-// WithCallImages sets TypeSafe-Danger-Zone-Images: true for a single call.
+// WithCallImages sets TypeSafe-Danger-Zone-Images: true for a single call. A call carrying image
+// assets sends the header automatically; pass false to suppress it.
 func WithCallImages(enabled bool) RequestOption {
 	return func(o *requestOptions) { o.images = new(enabled) }
 }
@@ -248,8 +250,9 @@ func WithAssets(assets any) RequestOption {
 }
 
 // WithExtraBody adds top-level fields to a request body, shallow-merged over "state", "model",
-// and "questions" after they are set. Merging is last-write-wins: a colliding key replaces the
-// SDK's value, and object values are replaced rather than deep-merged.
+// "questions", and "assets" after they are set. Merging is last-write-wins: a colliding key
+// replaces the SDK's value, and object values are replaced rather than deep-merged. Images are
+// collected from the final "state" and "questions", so an override is reflected in the assets.
 func WithExtraBody(extra map[string]any) RequestOption {
 	return func(o *requestOptions) { o.extraBody = extra }
 }

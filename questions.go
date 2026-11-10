@@ -1,7 +1,8 @@
 package typesafe
 
 import (
-	"encoding/json"
+	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
 	"fmt"
 	"reflect"
 	"strings"
@@ -25,6 +26,15 @@ type Question interface {
 // version does not model. To pass a plain map[string]any, hand it to the client directly — the
 // question parameter accepts any accepted container, which [NormalizeQuestions] validates.
 type Questions map[string]Question
+
+// Compile-time checks that every modeled question satisfies [Question].
+var (
+	_ Question = (*NoulQuestion)(nil)
+	_ Question = (*ChoiceQuestion)(nil)
+	_ Question = (*ScoreQuestion)(nil)
+	_ Question = (*BoxQuestion)(nil)
+	_ Question = RawQuestion(nil)
+)
 
 // NoulCriteria describes what counts as a yes or no answer. Both fields accept a string, a map,
 // or a slice, and may be left nil.
@@ -281,7 +291,9 @@ func (e *ScoreError) isTypeSafeError() {}
 //
 // Box questions find where something is in an image and return bounding box coordinates
 // as fractions of the image's width and height.
-// Requires the TypeSafe-Danger-Zone-Images: true header and the jev-preview / jev-1.14.0 model.
+// Requires the TypeSafe-Danger-Zone-Images: true header and a Jev 1.14 model (jev-latest, the
+// default, or jev-1.14.0). The SDK sends the header automatically when the request carries image
+// assets; [WithImages] and [WithCallImages] control it explicitly.
 //
 // See the box primitive (https://docs.typesafe.ai/primitives/box) for details.
 type BoxQuestion struct {
@@ -364,9 +376,9 @@ func (q RawQuestion) Validate(name string) error {
 // choiceOptionCount reports how many options a raw choice question declares, when its criteria value
 // is an object the SDK can count.
 func choiceOptionCount(criteria any) (int, bool) {
-	if rawMsg, ok := criteria.(json.RawMessage); ok {
-		var options map[string]json.RawMessage
-		if err := json.Unmarshal(rawMsg, &options); err != nil {
+	if rawMsg, ok := criteria.(jsontext.Value); ok {
+		var options map[string]jsontext.Value
+		if err := jsonv2.Unmarshal(rawMsg, &options, unmarshalOptions); err != nil {
 			return 0, false
 		}
 		return len(options), true
@@ -386,9 +398,9 @@ func isInvalidScoreCriteria(criteria any) bool {
 		return len(value) < 2 || len(value) > 10
 	case []string:
 		return len(value) < 2 || len(value) > 10
-	case json.RawMessage:
-		var items []json.RawMessage
-		if err := json.Unmarshal(value, &items); err == nil {
+	case jsontext.Value:
+		var items []jsontext.Value
+		if err := jsonv2.Unmarshal(value, &items, unmarshalOptions); err == nil {
 			return len(items) < 2 || len(items) > 10
 		}
 		return string(value) == "[]" || string(value) == "null"
@@ -476,7 +488,7 @@ func validateQuestion(name string, question any) error {
 
 // marshalWithExtra encodes a modeled question together with any forward-compatibility fields.
 func marshalWithExtra(question any, extra map[string]any) ([]byte, error) {
-	encoded, err := json.Marshal(question)
+	encoded, err := jsonv2.Marshal(question, marshalOptions)
 	if err != nil {
 		return nil, err
 	}
@@ -484,11 +496,11 @@ func marshalWithExtra(question any, extra map[string]any) ([]byte, error) {
 		return encoded, nil
 	}
 	var fields map[string]any
-	if err := json.Unmarshal(encoded, &fields); err != nil {
+	if err := jsonv2.Unmarshal(encoded, &fields, unmarshalOptions); err != nil {
 		return nil, err
 	}
 	for key, value := range extra {
 		fields[key] = value
 	}
-	return json.Marshal(fields)
+	return jsonv2.Marshal(fields, marshalOptions)
 }

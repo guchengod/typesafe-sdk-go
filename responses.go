@@ -2,7 +2,8 @@ package typesafe
 
 import (
 	"bytes"
-	"encoding/json"
+	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"log/slog"
 	"math"
@@ -30,6 +31,14 @@ type Answer interface {
 	// AnswerType returns the wire discriminator: "noul", "choice", "score", or "box".
 	AnswerType() string
 }
+
+// Compile-time checks that every modeled answer satisfies [Answer].
+var (
+	_ Answer = (*NoulAnswer)(nil)
+	_ Answer = (*ChoiceAnswer)(nil)
+	_ Answer = (*ScoreAnswer)(nil)
+	_ Answer = (*BoxAnswer)(nil)
+)
 
 // NoulAnswer is a yes/no answer.
 //
@@ -118,13 +127,13 @@ func (a *ScoreAnswer) LegendFor(level int) (any, bool) {
 // MarshalJSON encodes the rubric probabilities with their integer levels as JSON object keys.
 func (a *ScoreAnswer) MarshalJSON() ([]byte, error) {
 	type scoreAnswer ScoreAnswer
-	return json.Marshal(struct {
+	return jsonv2.Marshal(struct {
 		*scoreAnswer
 		Probabilities map[string]float64 `json:"probabilities"`
 	}{
 		scoreAnswer:   (*scoreAnswer)(a),
 		Probabilities: stringifyKeys(a.Probabilities),
-	})
+	}, marshalOptions)
 }
 
 func stringifyKeys[V any](source map[int]V) map[string]V {
@@ -235,11 +244,11 @@ func (r *SystemOneResponse) RawBody() []byte { return r.rawBody }
 
 // MarshalJSON encodes only the API payload, leaving HTTP metadata out of the result.
 func (r *SystemOneResponse) MarshalJSON() ([]byte, error) {
-	return json.Marshal(struct {
+	return jsonv2.Marshal(struct {
 		Model   string            `json:"model"`
 		Usage   Usage             `json:"usage"`
 		Answers map[string]Answer `json:"answers"`
-	}{r.Model, r.Usage, r.Answers})
+	}{r.Model, r.Usage, r.Answers}, marshalOptions)
 }
 
 // ModelMetadata describes a model available to the account.
@@ -290,9 +299,9 @@ func (r *ListModelsResponse) RawBody() []byte { return r.rawBody }
 
 // MarshalJSON encodes only the API payload, leaving HTTP metadata out of the result.
 func (r *ListModelsResponse) MarshalJSON() ([]byte, error) {
-	return json.Marshal(struct {
+	return jsonv2.Marshal(struct {
 		Models []ModelMetadata `json:"models"`
-	}{r.Models})
+	}{r.Models}, marshalOptions)
 }
 
 // answerTypes are the answer discriminators this SDK version models. Answers of any other type
@@ -352,9 +361,9 @@ func (e *answerDecodeError) Unwrap() error { return e.err }
 // dotted path of whichever one is malformed. A field left nil was absent; the literal "null"
 // decodes to a non-empty slice, which is how an explicit null is told apart from an absent field.
 type envelope struct {
-	Model   json.RawMessage `json:"model"`
-	Usage   json.RawMessage `json:"usage"`
-	Answers json.RawMessage `json:"answers"`
+	Model   jsontext.Value `json:"model"`
+	Usage   jsontext.Value `json:"usage"`
+	Answers jsontext.Value `json:"answers"`
 }
 
 // decoder turns a response body into a typed response, reporting the dotted path of the first
@@ -409,7 +418,7 @@ func openInto(d *decoder, target any) error {
 	if isJSONNull(d.rawBody) {
 		return d.invalid("")
 	}
-	if err := json.Unmarshal(d.rawBody, target); err != nil {
+	if err := jsonv2.Unmarshal(d.rawBody, target, unmarshalOptions); err != nil {
 		return d.invalid("")
 	}
 	return nil
@@ -432,7 +441,7 @@ func (d *decoder) decodeUsage(target *Usage) error {
 		InputTokens  *int `json:"input_tokens"`
 		OutputTokens *int `json:"output_tokens"`
 	}
-	if err := json.Unmarshal(d.envelope.Usage, &wire); err == nil && !isJSONNull(d.envelope.Usage) {
+	if err := jsonv2.Unmarshal(d.envelope.Usage, &wire, unmarshalOptions); err == nil && !isJSONNull(d.envelope.Usage) {
 		if wire.InputTokens != nil {
 			target.InputTokens = *wire.InputTokens
 		}
@@ -466,18 +475,18 @@ func (d *decoder) decodeUsage(target *Usage) error {
 }
 
 // isJSONNull reports whether a raw JSON value is absent or null.
-func isJSONNull(raw json.RawMessage) bool {
+func isJSONNull(raw jsontext.Value) bool {
 	trimmed := bytes.TrimSpace(raw)
 	return len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null"))
 }
 
 // objectEntries decodes a JSON object into its members, rejecting null and non-object values.
-func objectEntries(raw json.RawMessage) (map[string]json.RawMessage, bool) {
+func objectEntries(raw jsontext.Value) (map[string]jsontext.Value, bool) {
 	if isJSONNull(raw) {
 		return nil, false
 	}
-	var entries map[string]json.RawMessage
-	if err := json.Unmarshal(raw, &entries); err != nil {
+	var entries map[string]jsontext.Value
+	if err := jsonv2.Unmarshal(raw, &entries, unmarshalOptions); err != nil {
 		return nil, false
 	}
 	return entries, true
@@ -485,7 +494,7 @@ func objectEntries(raw json.RawMessage) (map[string]json.RawMessage, bool) {
 
 // decodeCount decodes a required whole number, rejecting null, absence, a fractional value, and a
 // value outside the range of an int.
-func decodeCount(raw json.RawMessage) (int, bool) {
+func decodeCount(raw jsontext.Value) (int, bool) {
 	if isJSONNull(raw) {
 		return 0, false
 	}
@@ -496,11 +505,11 @@ func decodeCount(raw json.RawMessage) (int, bool) {
 		}
 	}
 	var value int
-	if err := json.Unmarshal(raw, &value); err == nil {
+	if err := jsonv2.Unmarshal(raw, &value, unmarshalOptions); err == nil {
 		return value, true
 	}
 	var number float64
-	if err := json.Unmarshal(raw, &number); err != nil || math.Trunc(number) != number {
+	if err := jsonv2.Unmarshal(raw, &number, unmarshalOptions); err != nil || math.Trunc(number) != number {
 		return 0, false
 	}
 	if number > math.MaxInt64 || number < math.MinInt64 {
@@ -510,7 +519,7 @@ func decodeCount(raw json.RawMessage) (int, bool) {
 }
 
 // decodeNumber decodes a required JSON number, rejecting null and every non-numeric value.
-func decodeNumber(raw json.RawMessage) (float64, bool) {
+func decodeNumber(raw jsontext.Value) (float64, bool) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) == 0 || bytes.Equal(trimmed, []byte("null")) {
 		return 0, false
@@ -521,14 +530,14 @@ func decodeNumber(raw json.RawMessage) (float64, bool) {
 		}
 	}
 	var number float64
-	if err := json.Unmarshal(raw, &number); err != nil {
+	if err := jsonv2.Unmarshal(raw, &number, unmarshalOptions); err != nil {
 		return 0, false
 	}
 	return number, true
 }
 
 // decodeText decodes a required JSON string, rejecting null and every non-string value.
-func decodeText(raw json.RawMessage) (string, bool) {
+func decodeText(raw jsontext.Value) (string, bool) {
 	trimmed := bytes.TrimSpace(raw)
 	if len(trimmed) < 2 || trimmed[0] != '"' || trimmed[len(trimmed)-1] != '"' {
 		return "", false
@@ -537,7 +546,7 @@ func decodeText(raw json.RawMessage) (string, bool) {
 		return string(trimmed[1 : len(trimmed)-1]), true
 	}
 	var text string
-	if err := json.Unmarshal(raw, &text); err != nil {
+	if err := jsonv2.Unmarshal(raw, &text, unmarshalOptions); err != nil {
 		return "", false
 	}
 	return text, true
@@ -585,7 +594,7 @@ func parseSystemOneResponse(resp *response, questions []string, logger *slog.Log
 // parseAnswers decodes the answers object into typed answers plus the grouped accessors. Every
 // requested question must be present; the check runs before any answer is decoded, so a missing
 // answer is reported even when a later entry is malformed.
-func parseAnswers(raw json.RawMessage, questions []string, result *SystemOneResponse, d *decoder, logger *slog.Logger) error {
+func parseAnswers(raw jsontext.Value, questions []string, result *SystemOneResponse, d *decoder, logger *slog.Logger) error {
 	entries, ok := objectEntries(raw)
 	if !ok {
 		return d.invalid("answers")
@@ -619,7 +628,7 @@ func parseAnswers(raw json.RawMessage, questions []string, result *SystemOneResp
 }
 
 // parseAnswer decodes a single answer. An unrecognized discriminator yields a nil answer.
-func parseAnswer(name string, raw json.RawMessage, d *decoder) (Answer, error) {
+func parseAnswer(name string, raw jsontext.Value, d *decoder) (Answer, error) {
 	fields, ok := objectEntries(raw)
 	if !ok {
 		return nil, d.invalid(answerPath(name, "type"))
@@ -746,13 +755,13 @@ func parseAnswer(name string, raw json.RawMessage, d *decoder) (Answer, error) {
 }
 
 // floatMap decodes a field holding a JSON object of numbers keyed by name.
-func floatMap(fields map[string]json.RawMessage, field, name string, d *decoder) (map[string]float64, error) {
+func floatMap(fields map[string]jsontext.Value, field, name string, d *decoder) (map[string]float64, error) {
 	raw, ok := fields[field]
 	if !ok || isJSONNull(raw) {
 		return nil, d.invalid(answerPath(name, field))
 	}
 	var direct map[string]float64
-	if err := json.Unmarshal(raw, &direct); err == nil {
+	if err := jsonv2.Unmarshal(raw, &direct, unmarshalOptions); err == nil {
 		return direct, nil
 	}
 	entries, ok := objectEntries(raw)
@@ -773,13 +782,13 @@ func floatMap(fields map[string]json.RawMessage, field, name string, d *decoder)
 // legendMap decodes a field holding a JSON object keyed by rubric level. Keys stay as the strings the
 // API sends them as, because the reference types the legend as map<string, string> and only its value
 // is ever interpreted.
-func legendMap(fields map[string]json.RawMessage, field, name string, d *decoder) (map[string]any, error) {
+func legendMap(fields map[string]jsontext.Value, field, name string, d *decoder) (map[string]any, error) {
 	raw, ok := fields[field]
 	if !ok || isJSONNull(raw) {
 		return nil, d.invalid(answerPath(name, field))
 	}
 	var direct map[string]any
-	if err := json.Unmarshal(raw, &direct); err == nil {
+	if err := jsonv2.Unmarshal(raw, &direct, unmarshalOptions); err == nil {
 		return direct, nil
 	}
 	entries, ok := objectEntries(raw)
@@ -789,7 +798,7 @@ func legendMap(fields map[string]json.RawMessage, field, name string, d *decoder
 	decoded := make(map[string]any, len(entries))
 	for key, entry := range entries {
 		var item any
-		if err := json.Unmarshal(entry, &item); err != nil {
+		if err := jsonv2.Unmarshal(entry, &item, unmarshalOptions); err != nil {
 			return nil, d.invalid(answerPath(name, field, key))
 		}
 		decoded[key] = item
@@ -798,13 +807,13 @@ func legendMap(fields map[string]json.RawMessage, field, name string, d *decoder
 }
 
 // integerMap decodes a field holding a JSON object of numbers keyed by integer rubric levels.
-func integerMap(fields map[string]json.RawMessage, field, name string, d *decoder) (map[int]float64, error) {
+func integerMap(fields map[string]jsontext.Value, field, name string, d *decoder) (map[int]float64, error) {
 	raw, ok := fields[field]
 	if !ok || isJSONNull(raw) {
 		return nil, d.invalid(answerPath(name, field))
 	}
 	var direct map[int]float64
-	if err := json.Unmarshal(raw, &direct); err == nil {
+	if err := jsonv2.Unmarshal(raw, &direct, unmarshalOptions); err == nil {
 		return direct, nil
 	}
 	entries, ok := objectEntries(raw)
@@ -841,7 +850,7 @@ func answerPath(name string, segments ...string) string {
 // modelsEnvelope is the shape of a List Models success payload. The field name is part of the
 // API contract, so it is modeled as a struct.
 type modelsEnvelope struct {
-	Models json.RawMessage `json:"models"`
+	Models jsontext.Value `json:"models"`
 }
 
 // parseListModelsResponse decodes a List Models success response. Every field is required.
@@ -854,8 +863,8 @@ func parseListModelsResponse(resp *response) (*ListModelsResponse, error) {
 	if isJSONNull(wire.Models) {
 		return nil, d.invalid("models")
 	}
-	var entries []json.RawMessage
-	if err := json.Unmarshal(wire.Models, &entries); err != nil {
+	var entries []jsontext.Value
+	if err := jsonv2.Unmarshal(wire.Models, &entries, unmarshalOptions); err != nil {
 		return nil, d.invalid("models")
 	}
 	models := make([]ModelMetadata, 0, len(entries))
@@ -878,7 +887,7 @@ func parseListModelsResponse(resp *response) (*ListModelsResponse, error) {
 			if !ok {
 				return nil, d.invalid(path + "." + target.name)
 			}
-			if err := json.Unmarshal(value, target.value); err != nil {
+			if err := jsonv2.Unmarshal(value, target.value, unmarshalOptions); err != nil {
 				return nil, d.invalid(path + "." + target.name)
 			}
 		}

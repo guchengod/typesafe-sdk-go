@@ -6,11 +6,12 @@
 //
 // # Primitives
 //
-// Three question kinds are supported:
+// Four question kinds are supported:
 //
 //   - Noul: the probability that a statement holds, from 0 to 1.
 //   - Choice: the best-matching criteria key, its confidence, and a probability per key.
 //   - Score: an expected value across an ordered rubric whose levels start at 0.
+//   - Box: the bounding box locating what an instruction describes in an image.
 //
 // # Quickstart
 //
@@ -116,8 +117,9 @@
 //
 // Failures are typed and match with errors.As. Unsuccessful HTTP statuses map onto [APIError]
 // and its status-specific subclasses ([BadRequestError], [AuthenticationError],
-// [PermissionDeniedError], [NotFoundError], [UnprocessableEntityError], [RateLimitError],
-// [OverloadedError], [InternalServerError]); each unwraps to [APIError], so a single check finds both forms.
+// [PermissionDeniedError], [NotFoundError], [UnprocessableEntityError], [PayloadTooLargeError],
+// [UnsupportedMediaTypeError], [RateLimitError], [OverloadedError], [InternalServerError]); each
+// unwraps to [APIError], so a single check finds both forms.
 // [OverloadedError] (HTTP 529) and [RateLimitError] (HTTP 429) provide RetryAfter() for backoff delays.
 // Transport failures are [APIConnectionError] or [APITimeoutError], a malformed success body is
 // [APIResponseValidationError], and invalid configuration or input is [SDKError]. [AsAPIError],
@@ -129,7 +131,8 @@
 // (TYPESAFE_API_KEY, TYPESAFE_BASE_URL, TYPESAFE_DEFAULT_MODEL, TYPESAFE_LOG_LEVEL), then the SDK
 // defaults. [Client.SystemOne] and [ModelsService.List] accept [RequestOption] values that
 // override the client for a single call without mutating it: [WithModel], [WithCallTimeout],
-// [WithCallRetry], [WithCallHeader], [WithCallHeaders], and [WithExtraBody].
+// [WithCallRetry], [WithCallHeader], [WithCallHeaders], [WithCallCompression], [WithCallLongContext],
+// [WithCallImages], [WithAssets], and [WithExtraBody].
 //
 // # Design
 //
@@ -142,10 +145,10 @@
 //     [DefaultRetryPolicy].
 //   - Security by design: credential headers are redacted from logs ([NewRedactingHandler]
 //     extends that to your own records), credentials in URLs are stripped from error endpoints,
-//     response bodies are bounded to 16 MB, and the SDK's transport refuses TLS below 1.2.
+//     response bodies are bounded to 32 MiB, and the SDK's transport refuses TLS below 1.2.
 //     Headers the SDK owns cannot be displaced by caller-supplied ones.
 //   - Concurrency: a [Client] holds no per-request state and is safe for concurrent use; every
 //     call takes a context.Context for cancellation and deadlines.
-//   - Modern Go: for range over integers, min and max, slices and maps helpers, and generics via
-//     [SystemOneAs]. Standard library only, and Go 1.26 or newer.
+//   - Modern Go: for range over integers, min and max, slices and maps helpers, encoding/json/v2,
+//     and generics via [SystemOneAs]. Standard library only, and Go 1.27.3 or newer.
 package typesafe

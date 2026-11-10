@@ -2,7 +2,7 @@ package typesafe
 
 import (
 	"encoding/base64"
-	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -113,9 +113,9 @@ func TestImageMarshalJSONAndCollectAssets(t *testing.T) {
 		t.Fatalf("NewImageWithRef failed: %v", err)
 	}
 
-	encoded, err := json.Marshal(img)
+	encoded, err := jsonv2.Marshal(img, marshalOptions)
 	if err != nil {
-		t.Fatalf("json.Marshal failed: %v", err)
+		t.Fatalf("jsonv2.Marshal failed: %v", err)
 	}
 	if string(encoded) != `"ref-img-1"` {
 		t.Errorf("MarshalJSON = %s, want %q", encoded, "ref-img-1")
@@ -160,8 +160,8 @@ func TestSystemOneWithAssetsAndAutoCollection(t *testing.T) {
 	}
 
 	var recordedBody map[string]any
-	if err := json.Unmarshal(call.Body, &recordedBody); err != nil {
-		t.Fatalf("json.Unmarshal failed: %v", err)
+	if err := jsonv2.Unmarshal(call.Body, &recordedBody); err != nil {
+		t.Fatalf("jsonv2.Unmarshal failed: %v", err)
 	}
 
 	assetsMap, ok := recordedBody["assets"].(map[string]any)
@@ -174,5 +174,194 @@ func TestSystemOneWithAssetsAndAutoCollection(t *testing.T) {
 	}
 	if dogAsset["type"] != "image" || dogAsset["format"] != "jpg" {
 		t.Errorf("dogAsset = %+v", dogAsset)
+	}
+}
+
+// TestSystemOneCollectsImagesFromQuestions covers the Jev 1.14 rule that an image may appear in a
+// question's instructions or criteria, not only in state.
+func TestSystemOneCollectsImagesFromQuestions(t *testing.T) {
+	t.Parallel()
+
+	instructionsImage, err := NewImageWithRef("ref-instructions", []byte("image-data"), "png")
+	if err != nil {
+		t.Fatalf("NewImageWithRef failed: %v", err)
+	}
+	criteriaImage, err := NewImageWithRef("ref-criteria", []byte("more-image-data"), "jpg")
+	if err != nil {
+		t.Fatalf("NewImageWithRef failed: %v", err)
+	}
+
+	const answerBody = `{"model":"jev-1.14.0","usage":{"input_tokens":10,"output_tokens":2},"answers":{
+		"noul":{"type":"noul","noul":0.9},
+		"choice":{"type":"choice","choice":"dog","confidence":0.8,"probabilities":{"dog":0.8,"cat":0.2}},
+		"score":{"type":"score","score":1,"confidence":0.8,"legend":{"0":"low","1":"high"},"probabilities":{"0":0.5,"1":0.5}}}}`
+	client, transport := newMockClient(t, func(*http.Request, int) *http.Response {
+		return JSONResponse(http.StatusOK, answerBody)
+	})
+
+	questions := Questions{
+		"noul": NewNoul(map[string]any{"ask": "What is in this image?", "image": instructionsImage}),
+		"choice": NewChoice(
+			map[string]any{"dog": criteriaImage, "cat": nil},
+			WithInstructions("Which animal is shown?"),
+		),
+		"score": NewScore(
+			[]any{"low", map[string]any{"image": criteriaImage}},
+			WithInstructions("How prominent is the subject?"),
+		),
+	}
+
+	if _, err := client.SystemOne(t.Context(), "plain text state", questions); err != nil {
+		t.Fatalf("SystemOne failed: %v", err)
+	}
+
+	call := transport.lastCall(t)
+	if call.Header.Get(HeaderDangerZoneImages) != "true" {
+		t.Errorf("missing automatically enabled %s header", HeaderDangerZoneImages)
+	}
+
+	assetsMap, ok := decodingBody(t, call)["assets"].(map[string]any)
+	if !ok {
+		t.Fatal("assets missing from the request body")
+	}
+	for _, ref := range []string{"ref-instructions", "ref-criteria"} {
+		asset, ok := assetsMap[ref].(map[string]any)
+		if !ok {
+			t.Errorf("assets[%q] = %v, want a map", ref, assetsMap[ref])
+			continue
+		}
+		if asset["type"] != "image" {
+			t.Errorf("assets[%q].type = %v, want image", ref, asset["type"])
+		}
+	}
+}
+
+// TestSystemOneCollectsImagesFromStructState covers state values that are structs or pointers to
+// structs, which the earlier type-switch walker did not descend into.
+func TestSystemOneCollectsImagesFromStructState(t *testing.T) {
+	t.Parallel()
+
+	image, err := NewImageWithRef("ref-struct", []byte("image-data"), "png")
+	if err != nil {
+		t.Fatalf("NewImageWithRef failed: %v", err)
+	}
+	hidden, err := NewImageWithRef("ref-hidden", []byte("hidden-image"), "png")
+	if err != nil {
+		t.Fatalf("NewImageWithRef failed: %v", err)
+	}
+	type inner struct {
+		Photo  *Image `json:"photo"`
+		Hidden *Image `json:"-"`
+	}
+	state := struct {
+		Inner *inner `json:"inner"`
+	}{Inner: &inner{Photo: image, Hidden: hidden}}
+
+	client, transport := newMockClient(t, func(*http.Request, int) *http.Response {
+		return JSONResponse(http.StatusOK, `{"model":"jev-1.14.0","usage":{"input_tokens":1,"output_tokens":1},"answers":{"q":{"type":"noul","noul":0.5}}}`)
+	})
+
+	if _, err := client.SystemOne(t.Context(), state, Questions{"q": NewNoul("Is there a photo?")}); err != nil {
+		t.Fatalf("SystemOne failed: %v", err)
+	}
+	assetsMap, ok := decodingBody(t, transport.lastCall(t))["assets"].(map[string]any)
+	if !ok {
+		t.Fatal("assets missing from the request body")
+	}
+	if _, ok := assetsMap["ref-struct"]; !ok {
+		t.Errorf("assets = %v, want ref-struct", assetsMap)
+	}
+	if _, ok := assetsMap["ref-hidden"]; ok {
+		t.Errorf("assets = %v, want ref-hidden excluded by json:\"-\"", assetsMap)
+	}
+}
+
+// TestSystemOneDoesNotOverrideExplicitImagesHeader checks that WithCallImages(false) still wins over
+// the automatic header, while the assets themselves stay in the body.
+func TestSystemOneDoesNotOverrideExplicitImagesHeader(t *testing.T) {
+	t.Parallel()
+
+	image, err := NewImageWithRef("ref-disabled", []byte("image-data"), "png")
+	if err != nil {
+		t.Fatalf("NewImageWithRef failed: %v", err)
+	}
+	client, transport := newMockClient(t, func(*http.Request, int) *http.Response {
+		return JSONResponse(http.StatusOK, `{"model":"jev-1.14.0","usage":{"input_tokens":1,"output_tokens":1},"answers":{"q":{"type":"noul","noul":0.5}}}`)
+	})
+
+	if _, err := client.SystemOne(
+		t.Context(),
+		map[string]any{"photo": image},
+		Questions{"q": NewNoul("Is this a photo?")},
+		WithCallImages(false),
+	); err != nil {
+		t.Fatalf("SystemOne failed: %v", err)
+	}
+	call := transport.lastCall(t)
+	if header := call.Header.Get(HeaderDangerZoneImages); header != "" {
+		t.Errorf("%s = %q after WithCallImages(false), want empty", HeaderDangerZoneImages, header)
+	}
+	if _, ok := decodingBody(t, call)["assets"].(map[string]any); !ok {
+		t.Error("assets missing from the request body")
+	}
+}
+
+// TestSystemOneCollectsImagesFromExtraBodyState covers the overlay running before asset collection:
+// an image in a state supplied through WithExtraBody must still become an asset.
+func TestSystemOneCollectsImagesFromExtraBodyState(t *testing.T) {
+	t.Parallel()
+
+	image, err := NewImageWithRef("ref-extra-body", []byte("image-data"), "png")
+	if err != nil {
+		t.Fatalf("NewImageWithRef failed: %v", err)
+	}
+	client, transport := newMockClient(t, func(*http.Request, int) *http.Response {
+		return JSONResponse(http.StatusOK, `{"model":"jev-1.14.0","usage":{"input_tokens":1,"output_tokens":1},"answers":{"q":{"type":"noul","noul":0.5}}}`)
+	})
+
+	if _, err := client.SystemOne(
+		t.Context(),
+		"placeholder state",
+		Questions{"q": NewNoul("Is there a photo?")},
+		WithExtraBody(map[string]any{"state": map[string]any{"photo": image}}),
+	); err != nil {
+		t.Fatalf("SystemOne failed: %v", err)
+	}
+	call := transport.lastCall(t)
+	if header := call.Header.Get(HeaderDangerZoneImages); header != "true" {
+		t.Errorf("%s = %q, want true", HeaderDangerZoneImages, header)
+	}
+	assetsMap, ok := decodingBody(t, call)["assets"].(map[string]any)
+	if !ok {
+		t.Fatal("assets missing from the request body")
+	}
+	if _, ok := assetsMap["ref-extra-body"]; !ok {
+		t.Errorf("assets = %v, want ref-extra-body", assetsMap)
+	}
+}
+
+// TestCollectImagesFromHandlesCycles ensures a self-referential value cannot recurse forever.
+func TestCollectImagesFromHandlesCycles(t *testing.T) {
+	t.Parallel()
+
+	image, err := NewImageWithRef("ref-cycle", []byte("image-data"), "png")
+	if err != nil {
+		t.Fatalf("NewImageWithRef failed: %v", err)
+	}
+	type cyclic struct {
+		Self  *cyclic
+		Photo *Image
+	}
+	value := &cyclic{Photo: image}
+	value.Self = value
+
+	cyclicMap := map[string]any{"photo": image}
+	cyclicMap["self"] = cyclicMap
+
+	assets := map[string]any{}
+	collectImagesFrom(value, assets)
+	collectImagesFrom(cyclicMap, assets)
+	if _, ok := assets["ref-cycle"]; !ok {
+		t.Errorf("assets = %v, want ref-cycle", assets)
 	}
 }

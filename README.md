@@ -20,7 +20,7 @@
 - **强类型设计**：全链路结构体类型支持，可配合 `errors.As` 提取细分错误，亦可通过 `SystemOneAs[T]` 反序列化到自定义业务结构体。
 - **开箱即用 CLI**：附带纯标准库打造的命令行工具 `cmd/typesafe`，完美适配 Shell 脚本与流水线。
 
-> 需要 **Go 1.26 或更高版本**。
+> 需要 **Go 1.27.3 或更高版本**。
 
 ---
 
@@ -131,7 +131,7 @@ TypeSafe 提供了四种面向结构化决策的确定性原子问题类型：
 
 TypeSafe 支持在 `state`、问题指令或准则中直接包含图像，并使用 `Box` 原语在图像中精准定位物体。
 
-> 开启图片或 Box 问题需要使用 `jev-preview` 模型，并附带 `TypeSafe-Danger-Zone-Images: true` 标头（通过 `typesafe.WithImages(true)` 或调用选项 `typesafe.WithCallImages(true)` 开启）。
+> Box 问题需要 Jev 1.14 模型（`jev-latest` 默认即指向 `jev-1.14.0`）。请求中包含图像资产时，SDK 会自动附带 `TypeSafe-Danger-Zone-Images: true` 标头；也可通过 `typesafe.WithImages(true)` 或调用选项 `typesafe.WithCallImages(true)` 显式控制。
 
 ```go
 package main
@@ -165,7 +165,6 @@ func main() {
 			"has_cup": typesafe.NewNoul("`photo` 中是否有咖啡杯？"),
 			"cup_box": typesafe.NewBox("`photo` 中的咖啡杯"),
 		},
-		typesafe.WithModel(typesafe.ModelJevPreview),
 	)
 	if err != nil {
 		log.Fatal(err)

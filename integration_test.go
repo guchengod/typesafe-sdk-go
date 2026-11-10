@@ -43,6 +43,9 @@ func liveAPIKey(t *testing.T) string {
 			}
 		}
 	}
+	if err := scanner.Err(); err != nil {
+		t.Fatalf("reading .env: %v", err)
+	}
 	t.Skipf("skipping integration test: %s is not set", APIKeyEnv)
 	return ""
 }
@@ -348,6 +351,50 @@ func TestIntegrationMultimodalAndBox(t *testing.T) {
 	}
 	if resp.Model == "" {
 		t.Error("Model is empty")
+	}
+	hasShape, ok := resp.Nouls()["has_shape"]
+	if !ok || hasShape.Noul < 0.5 {
+		t.Errorf("has_shape = %+v, want noul >= 0.5", hasShape)
+	}
+	shapeBox, ok := resp.Boxes()["shape_box"]
+	if !ok {
+		t.Fatal("no box answer named shape_box")
+	}
+	if shapeBox.Box.Top < 0 || shapeBox.Box.Bottom > 1 || shapeBox.Box.Left < 0 || shapeBox.Box.Right > 1 {
+		t.Errorf("shapeBox.Box out of bounds: %+v", shapeBox.Box)
+	}
+}
+
+// TestIntegrationImageInInstructions verifies the Jev 1.14 rule that an image may live in a
+// question's instructions rather than in state, and that the SDK discovers it, defines the asset,
+// and enables the images header without an explicit option.
+func TestIntegrationImageInInstructions(t *testing.T) {
+	if testing.Short() {
+		t.Skip("skipping integration test in short mode")
+	}
+	client := liveClient(t)
+
+	img, err := NewImage(createTestPNG(512, 512), "png")
+	if err != nil {
+		t.Fatalf("NewImage() error = %v", err)
+	}
+
+	resp, err := client.SystemOne(
+		t.Context(),
+		"Find the colored shape.",
+		Questions{
+			"has_shape": NewNoul(map[string]any{
+				"question": "Is there a blue rectangle in this image?",
+				"image":    img,
+			}),
+			"shape_box": NewBox(map[string]any{
+				"target": "the blue rectangle",
+				"image":  img,
+			}),
+		},
+	)
+	if err != nil {
+		t.Fatalf("SystemOne with an image in instructions error = %v", err)
 	}
 	hasShape, ok := resp.Nouls()["has_shape"]
 	if !ok || hasShape.Noul < 0.5 {

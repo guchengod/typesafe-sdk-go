@@ -1,7 +1,8 @@
 package typesafe
 
 import (
-	"encoding/json"
+	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
 	"io"
@@ -19,13 +20,13 @@ func questionsWire(t *testing.T, value any) map[string]any {
 	return decoded
 }
 
-// questionsJSON returns the canonical JSON encoding of a value. json.Marshal sorts object keys,
-// so two encodings are equal exactly when the values are structurally equal.
+// questionsJSON returns the canonical JSON encoding of a value. marshalOptions makes object key
+// order deterministic, so two encodings are equal exactly when the values are structurally equal.
 func questionsJSON(t *testing.T, value any) string {
 	t.Helper()
-	encoded, err := json.Marshal(value)
+	encoded, err := jsonv2.Marshal(value, marshalOptions)
 	if err != nil {
-		t.Fatalf("json.Marshal(%T) error = %v", value, err)
+		t.Fatalf("jsonv2.Marshal(%T) error = %v", value, err)
 	}
 	return string(encoded)
 }
@@ -33,12 +34,12 @@ func questionsJSON(t *testing.T, value any) string {
 // questionsDecode marshals value and unmarshals it into target.
 func questionsDecode(t *testing.T, value, target any) {
 	t.Helper()
-	encoded, err := json.Marshal(value)
+	encoded, err := jsonv2.Marshal(value, marshalOptions)
 	if err != nil {
-		t.Fatalf("json.Marshal(%T) error = %v", value, err)
+		t.Fatalf("jsonv2.Marshal(%T) error = %v", value, err)
 	}
-	if err := json.Unmarshal(encoded, target); err != nil {
-		t.Fatalf("json.Unmarshal(%s) error = %v", encoded, err)
+	if err := jsonv2.Unmarshal(encoded, target); err != nil {
+		t.Fatalf("jsonv2.Unmarshal(%s) error = %v", encoded, err)
 	}
 }
 
@@ -101,9 +102,9 @@ func answeringQuestionsJSON(t *testing.T, request *http.Request) string {
 		body = read
 	}
 	var sent struct {
-		Questions map[string]json.RawMessage `json:"questions"`
+		Questions map[string]jsontext.Value `json:"questions"`
 	}
-	_ = json.Unmarshal(body, &sent)
+	_ = jsonv2.Unmarshal(body, &sent)
 	names := make([]string, 0, len(sent.Questions))
 	for name := range sent.Questions {
 		names = append(names, name)
@@ -111,7 +112,7 @@ func answeringQuestionsJSON(t *testing.T, request *http.Request) string {
 	sort.Strings(names)
 	answers := make([]string, 0, len(names))
 	for _, name := range names {
-		key, err := json.Marshal(name)
+		key, err := jsonv2.Marshal(name, marshalOptions)
 		if err != nil {
 			t.Fatalf("encoding the question id %q: %v", name, err)
 		}
@@ -767,9 +768,9 @@ func TestNormalizeQuestionsScoreCriteriaValidation(t *testing.T) {
 		{name: "raw 11-element array", value: map[string]any{"type": "score", "criteria": []any{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}}},
 		{name: "raw empty string array", value: map[string]any{"type": "score", "criteria": []string{}}},
 		{name: "raw 1-element string array", value: map[string]any{"type": "score", "criteria": []string{"one"}}},
-		{name: "raw empty raw message", value: map[string]any{"type": "score", "criteria": json.RawMessage("[]")}},
-		{name: "raw 1-element raw message", value: map[string]any{"type": "score", "criteria": json.RawMessage(`["one"]`)}},
-		{name: "raw null raw message", value: map[string]any{"type": "score", "criteria": json.RawMessage("null")}},
+		{name: "raw empty raw message", value: map[string]any{"type": "score", "criteria": jsontext.Value("[]")}},
+		{name: "raw 1-element raw message", value: map[string]any{"type": "score", "criteria": jsontext.Value(`["one"]`)}},
+		{name: "raw null raw message", value: map[string]any{"type": "score", "criteria": jsontext.Value("null")}},
 		{name: "raw 1-element map slice", value: map[string]any{"type": "score", "criteria": []map[string]any{{"desc": "one"}}}},
 		{name: "raw 11-element int slice", value: map[string]any{"type": "score", "criteria": []int{1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11}}},
 		{name: "typed raw question with empty criteria", value: RawQuestion{"type": "score", "criteria": []any{}}},
@@ -817,7 +818,7 @@ func TestNormalizeQuestionsScoreCriteriaValidation(t *testing.T) {
 		},
 		{
 			name:  "raw raw message",
-			value: map[string]any{"type": "score", "criteria": json.RawMessage(`["bad","good"]`)},
+			value: map[string]any{"type": "score", "criteria": jsontext.Value(`["bad","good"]`)},
 			want:  map[string]any{"type": "score", "criteria": []any{"bad", "good"}},
 		},
 		{
@@ -1183,13 +1184,13 @@ func TestBoxQuestionSerializationAndOptions(t *testing.T) {
 		t.Errorf("Validate failed: %v", err)
 	}
 
-	encoded, err := json.Marshal(box)
+	encoded, err := jsonv2.Marshal(box, marshalOptions)
 	if err != nil {
-		t.Fatalf("json.Marshal failed: %v", err)
+		t.Fatalf("jsonv2.Marshal failed: %v", err)
 	}
 	var decoded map[string]any
-	if err := json.Unmarshal(encoded, &decoded); err != nil {
-		t.Fatalf("json.Unmarshal failed: %v", err)
+	if err := jsonv2.Unmarshal(encoded, &decoded); err != nil {
+		t.Fatalf("jsonv2.Unmarshal failed: %v", err)
 	}
 	if decoded["type"] != "box" {
 		t.Errorf("type = %v, want box", decoded["type"])

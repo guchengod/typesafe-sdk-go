@@ -2,7 +2,7 @@ package typesafe
 
 import (
 	"bytes"
-	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"io"
 	"log/slog"
 	"net/http"
@@ -136,7 +136,7 @@ func noRetryPolicy() *RetryPolicy {
 func decodingBody(t *testing.T, call recordedCall) map[string]any {
 	t.Helper()
 	var decoded map[string]any
-	if err := json.Unmarshal(call.Body, &decoded); err != nil {
+	if err := jsonv2.Unmarshal(call.Body, &decoded); err != nil {
 		t.Fatalf("request body is not JSON: %v (body=%q)", err, call.Body)
 	}
 	return decoded

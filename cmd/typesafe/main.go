@@ -12,7 +12,8 @@ package main
 
 import (
 	"context"
-	"encoding/json"
+	"encoding/json/jsontext"
+	jsonv2 "encoding/json/v2"
 	"errors"
 	"flag"
 	"fmt"
@@ -388,14 +389,14 @@ func buildQuestions(source string, stdin io.Reader, nouls, choices, scores, boxe
 		}
 		text, ok := raw.(string)
 		if !ok {
-			encoded, err := json.Marshal(raw)
+			encoded, err := jsonv2.Marshal(raw, jsonv2.Deterministic(true))
 			if err != nil {
 				return nil, err
 			}
 			text = string(encoded)
 		}
 		var decoded map[string]any
-		if err := json.Unmarshal([]byte(text), &decoded); err != nil {
+		if err := jsonv2.Unmarshal([]byte(text), &decoded); err != nil {
 			if _, statErr := os.Stat(strings.TrimSpace(text)); statErr == nil {
 				return nil, fmt.Errorf("--questions %s names a file; prefix it with @ to read it: @%s", text, text)
 			}
@@ -556,7 +557,7 @@ func parseState(value any) any {
 		return value
 	}
 	var decoded any
-	if err := json.Unmarshal([]byte(text), &decoded); err != nil {
+	if err := jsonv2.Unmarshal([]byte(text), &decoded); err != nil {
 		return text
 	}
 	return decoded
@@ -564,9 +565,8 @@ func parseState(value any) any {
 
 // writeJSON prints a response as indented JSON.
 func writeJSON(stdout, stderr io.Writer, value any) int {
-	encoder := json.NewEncoder(stdout)
-	encoder.SetIndent("", "  ")
-	if err := encoder.Encode(value); err != nil {
+	encoder := jsontext.NewEncoder(stdout, jsontext.WithIndent("  "))
+	if err := jsonv2.MarshalEncode(encoder, value, jsonv2.Deterministic(true)); err != nil {
 		return fail(stderr, exitUsage, err)
 	}
 	return exitOK

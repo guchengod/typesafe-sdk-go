@@ -1,7 +1,7 @@
 package typesafe
 
 import (
-	"encoding/json"
+	"encoding/json/jsontext"
 	"reflect"
 	"strings"
 )
@@ -15,8 +15,8 @@ func typeOf[T any]() reflect.Type { return reflect.TypeFor[T]() }
 // A field is required unless it can represent absence — a pointer, map, slice, or interface
 // holds nil for "not reported" — or it is tagged `omitempty`, or it is untagged, embedded, or
 // unexported. Only the top level is inspected: nested structures decode with standard
-// encoding/json semantics, where a missing field leaves the zero value.
-func missingRequiredField(document map[string]json.RawMessage, target reflect.Type) string {
+// encoding/json/v2 semantics, where a missing field leaves the zero value.
+func missingRequiredField(document map[string]jsontext.Value, target reflect.Type) string {
 	for target.Kind() == reflect.Pointer {
 		target = target.Elem()
 	}

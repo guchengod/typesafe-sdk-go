@@ -3,10 +3,11 @@ package typesafe
 import (
 	"crypto/rand"
 	"encoding/base64"
-	"encoding/json"
+	jsonv2 "encoding/json/v2"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"strings"
 )
 
@@ -129,9 +130,9 @@ func (img *Image) Asset() Asset {
 // embedded directly inside state, instructions, or criteria.
 func (img *Image) MarshalJSON() ([]byte, error) {
 	if img == nil {
-		return json.Marshal("")
+		return jsonv2.Marshal("", marshalOptions)
 	}
-	return json.Marshal(img.Ref)
+	return jsonv2.Marshal(img.Ref, marshalOptions)
 }
 
 // CollectAssets returns an Assets map containing all the given images.
@@ -165,35 +166,92 @@ func newRandomRef(prefix string) string {
 	return fmt.Sprintf("%s-%08x-%04x-%04x-%04x-%012x", prefix, b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
-// collectImagesFrom walks val recursively to discover any embedded *Image instances.
+// imagePointerType is the type the walker recognizes as an image reference.
+var imagePointerType = reflect.TypeFor[*Image]()
+
+// collectImagesFrom walks val recursively to discover any embedded *Image instances, so an image
+// placed in state, a question's instructions, or its criteria is registered in the request's assets.
+// It follows pointers, interfaces, exported struct fields, maps, slices, and arrays, and tolerates
+// cycles in the value graph.
 func collectImagesFrom(val any, assets map[string]any) {
 	if val == nil || assets == nil {
 		return
 	}
-	switch v := val.(type) {
-	case *Image:
-		if v != nil && v.Ref != "" {
-			assets[v.Ref] = v.Asset()
-		}
-	case []any:
-		for _, item := range v {
-			collectImagesFrom(item, assets)
-		}
-	case []*Image:
-		for _, img := range v {
-			if img != nil && img.Ref != "" {
-				assets[img.Ref] = img.Asset()
+	walkImages(reflect.ValueOf(val), assets, make(map[imageVisit]bool))
+}
+
+// imageVisit identifies a reference-typed value the walker has already visited, so a cyclic value
+// cannot recurse forever.
+type imageVisit struct {
+	typ reflect.Type
+	ptr uintptr
+}
+
+// walkImages recurses through value, collecting every reachable *Image into assets.
+func walkImages(value reflect.Value, assets map[string]any, seen map[imageVisit]bool) {
+	if !value.IsValid() {
+		return
+	}
+	if value.Type() == imagePointerType {
+		if value.CanInterface() {
+			if image, ok := value.Interface().(*Image); ok && image != nil && image.Ref != "" {
+				assets[image.Ref] = image.Asset()
 			}
 		}
-	case map[string]any:
-		for _, item := range v {
-			collectImagesFrom(item, assets)
+		return
+	}
+	switch value.Kind() {
+	case reflect.Interface:
+		if !value.IsNil() {
+			walkImages(value.Elem(), assets, seen)
 		}
-	case map[string]*Image:
-		for _, img := range v {
-			if img != nil && img.Ref != "" {
-				assets[img.Ref] = img.Asset()
+	case reflect.Pointer:
+		if !value.IsNil() && !alreadySeen(value, seen) {
+			walkImages(value.Elem(), assets, seen)
+		}
+	case reflect.Map:
+		if value.IsNil() || alreadySeen(value, seen) {
+			return
+		}
+		iterator := value.MapRange()
+		for iterator.Next() {
+			walkImages(iterator.Value(), assets, seen)
+		}
+	case reflect.Slice:
+		// Byte slices are data, not containers of images; skipping them also avoids walking large
+		// payloads such as jsontext.Value.
+		if value.IsNil() || value.Type().Elem().Kind() == reflect.Uint8 || alreadySeen(value, seen) {
+			return
+		}
+		for index := range value.Len() {
+			walkImages(value.Index(index), assets, seen)
+		}
+	case reflect.Array:
+		for index := range value.Len() {
+			walkImages(value.Index(index), assets, seen)
+		}
+	case reflect.Struct:
+		for structField, field := range value.Fields() {
+			// Unexported fields and fields tagged `json:"-"` are not part of the JSON wire form.
+			if field.CanInterface() && !jsonIgnored(structField) {
+				walkImages(field, assets, seen)
 			}
 		}
 	}
+}
+
+// jsonIgnored reports whether a struct field is excluded from the JSON wire form.
+func jsonIgnored(field reflect.StructField) bool {
+	name, _, _ := strings.Cut(field.Tag.Get("json"), ",")
+	return name == "-"
+}
+
+// alreadySeen records a reference-typed value and reports whether it was visited before.
+func alreadySeen(value reflect.Value, seen map[imageVisit]bool) bool {
+	key := imageVisit{typ: value.Type(), ptr: value.Pointer()}
+	if seen[key] {
+		return true
+	}
+	seen[key] = true
+	return false
 }
