@@ -663,3 +663,22 @@ func TestLogResponseSeparatesInfoFromDebugWireAndSanitizesURLs(t *testing.T) {
 		})
 	}
 }
+
+func TestIsSecretHeaderFallbackPathsAndCleanContainerPassThrough(t *testing.T) {
+	t.Parallel()
+
+	longSecret := strings.Repeat("x", 80) + "-api_key"
+	if !isSecretHeader(longSecret) {
+		t.Errorf("isSecretHeader(>64-byte secret) = false, want true")
+	}
+	longClean := strings.Repeat("x", 80) + "-request-id"
+	if isSecretHeader(longClean) {
+		t.Errorf("isSecretHeader(>64-byte clean) = true, want false")
+	}
+	if !isSecretHeader("\u00a0X-Custom-Token\u00a0") {
+		t.Errorf("isSecretHeader(NBSP-wrapped secret) = false, want true")
+	}
+	if isSecretHeader("X-Ümlaut-Header") {
+		t.Errorf("isSecretHeader(non-ASCII clean) = true, want false")
+	}
+}

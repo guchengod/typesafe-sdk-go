@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"maps"
 	"net/http"
+	"slices"
 	"sort"
 	"strings"
 )
@@ -129,15 +130,16 @@ func (c *Client) systemOne(ctx context.Context, state any, questions any, opts [
 		body["questions"] = validatedExtraQuestions
 	}
 	// Images may appear in state, instructions, or criteria, so the final state and questions are
-	// scanned into a per-call copy so concurrent or repeated requests never mutate shared caller maps.
-	assets := maps.Clone(options.assets)
-	if assets == nil {
-		assets = make(map[string]any)
+	// scanned into a per-call copy (allocated lazily when options.assets is empty) so concurrent or
+	// repeated requests never mutate shared caller maps and plain-text calls avoid map allocation.
+	var assets map[string]any
+	if len(options.assets) > 0 {
+		assets = maps.Clone(options.assets)
 	}
-	if err := collectImagesFrom(body["state"], assets); err != nil {
+	if err := collectImagesInto(body["state"], &assets); err != nil {
 		return nil, nil, err
 	}
-	if err := collectImagesFrom(body["questions"], assets); err != nil {
+	if err := collectImagesInto(body["questions"], &assets); err != nil {
 		return nil, nil, err
 	}
 	if _, overridden := body["assets"]; !overridden && len(assets) > 0 {
@@ -196,13 +198,14 @@ func liftAnswers(resp *response, parsed *SystemOneResponse, asked []string) (map
 	if err := jsonv2.Unmarshal(encoded, &entries); err != nil {
 		return nil, newValidationError(resp, "answers")
 	}
-	modeled := make(map[string]jsontext.Value, len(parsed.Answers))
-	for name := range parsed.Answers {
-		if entry, exists := entries[name]; exists {
-			modeled[name] = entry
+	modeled := entries
+	if len(parsed.Answers) != len(entries) {
+		modeled = make(map[string]jsontext.Value, len(parsed.Answers))
+		for name := range parsed.Answers {
+			if entry, exists := entries[name]; exists {
+				modeled[name] = entry
+			}
 		}
-	}
-	if len(modeled) != len(entries) {
 		if answers, err := jsonv2.Marshal(modeled, marshalOptions); err == nil {
 			deleteCaseInsensitiveKeys(document, "answers")
 			document["answers"] = answers
@@ -210,9 +213,7 @@ func liftAnswers(resp *response, parsed *SystemOneResponse, asked []string) (map
 	}
 	// Clear any unvalidated top-level keys that collide with asked question names, even when an
 	// answer had an unrecognized type and was omitted from modeled.
-	askedSet := make(map[string]bool, len(asked))
 	for _, name := range asked {
-		askedSet[name] = true
 		if !isEnvelopeFieldName(name) {
 			deleteCaseInsensitiveKeys(document, name)
 		}
@@ -221,7 +222,7 @@ func liftAnswers(resp *response, parsed *SystemOneResponse, asked []string) (map
 		if isEnvelopeFieldName(name) {
 			continue
 		}
-		if askedSet[name] {
+		if slices.Contains(asked, name) {
 			document[name] = entry
 		} else if _, exists := findCaseInsensitiveKey(document, name); !exists {
 			document[name] = entry

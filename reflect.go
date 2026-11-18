@@ -3,6 +3,7 @@ package typesafe
 import (
 	"encoding/json/jsontext"
 	"reflect"
+	"slices"
 	"strings"
 )
 
@@ -17,18 +18,22 @@ func typeOf[T any]() reflect.Type { return reflect.TypeFor[T]() }
 // unexported. Only the top level is inspected: nested structures decode with standard
 // encoding/json/v2 semantics, where a missing field leaves the zero value.
 func missingRequiredField(document map[string]jsontext.Value, target reflect.Type) string {
-	return missingRequiredFieldSeen(document, target, make(map[reflect.Type]bool))
+	// Stack-backed seen slice avoids heap map allocation on flat and shallowly embedded structs.
+	var stackSeen [8]reflect.Type
+	return missingRequiredFieldSeen(document, target, stackSeen[:0])
 }
 
-func missingRequiredFieldSeen(document map[string]jsontext.Value, target reflect.Type, seen map[reflect.Type]bool) string {
+func missingRequiredFieldSeen(document map[string]jsontext.Value, target reflect.Type, seen []reflect.Type) string {
 	for target.Kind() == reflect.Pointer {
 		target = target.Elem()
 	}
-	if target.Kind() != reflect.Struct || seen[target] {
+	if target.Kind() != reflect.Struct || slices.Contains(seen, target) {
 		return ""
 	}
-	seen[target] = true
-	for field := range target.Fields() {
+	seen = append(seen, target)
+	numFields := target.NumField()
+	for i := range numFields {
+		field := target.Field(i)
 		if field.Anonymous {
 			tag, tagged := field.Tag.Lookup("json")
 			tagName, options, _ := strings.Cut(tag, ",")

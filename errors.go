@@ -355,6 +355,11 @@ func cleanURL(rawURL string) string {
 	if rawURL == "" {
 		return ""
 	}
+	// Fast path: validated BaseURL + constant endpoint paths are already lowercase http(s) ASCII URLs
+	// with no userinfo, query, fragment, or percent-escapes, so url.Parse would return rawURL verbatim.
+	if isAlreadyCleanASCIIURL(rawURL) {
+		return rawURL
+	}
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
 		return fallbackCleanURL(rawURL)
@@ -363,6 +368,28 @@ func cleanURL(rawURL string) string {
 	parsed.RawQuery = ""
 	parsed.Fragment = ""
 	return parsed.String()
+}
+
+func isAlreadyCleanASCIIURL(rawURL string) bool {
+	var rest string
+	switch {
+	case strings.HasPrefix(rawURL, "https://"):
+		rest = rawURL[len("https://"):]
+	case strings.HasPrefix(rawURL, "http://"):
+		rest = rawURL[len("http://"):]
+	default:
+		return false
+	}
+	if rest == "" || rest[0] == '/' {
+		return false
+	}
+	for i := range len(rest) {
+		c := rest[i]
+		if c <= 0x20 || c >= 0x7f || c == '@' || c == '?' || c == '#' || c == '%' || c == '\\' {
+			return false
+		}
+	}
+	return true
 }
 
 func fallbackCleanURL(rawURL string) string {

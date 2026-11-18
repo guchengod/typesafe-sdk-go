@@ -641,7 +641,6 @@ func parseSystemOneResponse(resp *response, questions []string, logger *slog.Log
 		requestID:   resp.RequestID,
 		rawResponse: rawHTTPResponse(resp), //nolint:bodyclose // synthetic Response uses http.NoBody; wire body was closed in execute
 		rawBody:     resp.Body,
-		Answers:     map[string]Answer{},
 		nouls:       map[string]*NoulAnswer{},
 		choices:     map[string]*ChoiceAnswer{},
 		scores:      map[string]*ScoreAnswer{},
@@ -677,6 +676,7 @@ func parseAnswers(raw jsontext.Value, questions []string, result *SystemOneRespo
 			return d.invalid(answerPath(name))
 		}
 	}
+	result.Answers = make(map[string]Answer, len(entries))
 	var firstSkippedName string
 	skippedCount := 0
 	for name, entry := range entries {

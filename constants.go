@@ -120,15 +120,19 @@ const (
 	EncodingZstd          = "zstd"
 )
 
+var cachedRuntimeString = fmt.Sprintf("go/%s (%s; %s)", strings.TrimPrefix(runtime.Version(), "go"), runtime.GOOS, runtime.GOARCH)
+
+const cachedSDKUserAgent = SDKName + "/" + SDKVersion
+
 // RuntimeString returns the runtime environment string for SDK identification, sent in the
 // X-TypeSafe-Runtime header.
 func RuntimeString() string {
-	return fmt.Sprintf("go/%s (%s; %s)", strings.TrimPrefix(runtime.Version(), "go"), runtime.GOOS, runtime.GOARCH)
+	return cachedRuntimeString
 }
 
 // sdkUserAgent returns the identifier sent in the User-Agent and X-TypeSafe-SDK headers.
 func sdkUserAgent() string {
-	return SDKName + "/" + SDKVersion
+	return cachedSDKUserAgent
 }
 
 // secretHeaders is the set of header names that must be redacted in logs.

@@ -1,10 +1,13 @@
 package typesafe
 
 import (
+	"bytes"
 	"context"
 	"log/slog"
+	"maps"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 )
 
@@ -60,6 +63,40 @@ func defaultLogger() *slog.Logger {
 // credential terms ("token", "secret", "apikey", "password", "privatekey", "credential",
 // "authkey", "subscriptionkey", "accesskey", "bearer"), regardless of separator style.
 func isSecretHeader(name string) bool {
+	// Zero-allocation stack path for ASCII header and attribute names up to 64 bytes.
+	if trimmed, ok := trimShortASCII(name); ok {
+		if trimmed == "" {
+			return false
+		}
+		var lowerBuf [64]byte
+		var normBuf [64]byte
+		normLen := 0
+		for i := range len(trimmed) {
+			c := trimmed[i]
+			if c >= 'A' && c <= 'Z' {
+				c += 'a' - 'A'
+			}
+			lowerBuf[i] = c
+			if c != '-' && c != '_' {
+				normBuf[normLen] = c
+				normLen++
+			}
+		}
+		if _, known := secretHeaders[string(lowerBuf[:len(trimmed)])]; known {
+			return true
+		}
+		if normLen < 5 {
+			return false
+		}
+		norm := normBuf[:normLen]
+		for _, marker := range secretKeyMarkerBytes {
+			if bytes.Contains(norm, marker) {
+				return true
+			}
+		}
+		return false
+	}
+
 	lowered := strings.ToLower(strings.TrimSpace(name))
 	if lowered == "" {
 		return false
@@ -74,6 +111,31 @@ func isSecretHeader(name string) bool {
 		}
 	}
 	return false
+}
+
+func trimShortASCII(s string) (string, bool) {
+	start := 0
+	for start < len(s) && isASCIISpace(s[start]) {
+		start++
+	}
+	end := len(s)
+	for end > start && isASCIISpace(s[end-1]) {
+		end--
+	}
+	trimmed := s[start:end]
+	if len(trimmed) > 64 {
+		return "", false
+	}
+	for i := range len(trimmed) {
+		if trimmed[i] >= 0x80 {
+			return "", false
+		}
+	}
+	return trimmed, true
+}
+
+func isASCIISpace(c byte) bool {
+	return c == ' ' || (c >= '\t' && c <= '\r')
 }
 
 var secretKeyMarkers = []string{
@@ -93,6 +155,14 @@ var secretKeyMarkers = []string{
 	"wwwauthenticate",
 	"proxyauthenticate",
 }
+
+var secretKeyMarkerBytes = func() [][]byte {
+	out := make([][]byte, len(secretKeyMarkers))
+	for i, m := range secretKeyMarkers {
+		out[i] = []byte(m)
+	}
+	return out
+}()
 
 func stripKeySeparators(s string) string {
 	if !strings.ContainsAny(s, "-_") {
@@ -156,24 +226,47 @@ func (r *RedactingHandler) Enabled(ctx context.Context, level slog.Level) bool {
 }
 
 // Handle redacts the record's attributes and forwards it to the wrapped handler. Attributes that
-// carry no credential are passed through unchanged.
+// carry no credential are passed through unchanged without allocating a replacement slice.
 func (r *RedactingHandler) Handle(ctx context.Context, record slog.Record) error {
 	if r == nil || r.handler == nil {
 		return nil
 	}
-	attrs := make([]slog.Attr, 0, record.NumAttrs())
-	changed := false
-	record.Attrs(func(attr slog.Attr) bool {
-		if replacement, ok := redactAttr(attr); ok {
-			attr, changed = replacement, true
-		}
-		attrs = append(attrs, attr)
-		return true
-	})
-	if !changed {
+	if record.NumAttrs() == 0 {
 		return r.handler.Handle(ctx, record)
 	}
-	// Only rebuild the record when something actually needed redaction.
+	firstChanged := -1
+	var firstReplacement slog.Attr
+	idx := 0
+	record.Attrs(func(attr slog.Attr) bool {
+		if replacement, ok := redactAttr(attr); ok {
+			firstChanged = idx
+			firstReplacement = replacement
+			return false
+		}
+		idx++
+		return true
+	})
+	if firstChanged < 0 {
+		return r.handler.Handle(ctx, record)
+	}
+	// Rebuild the record only when an attribute needed redaction, preserving already-checked prefix attrs.
+	attrs := make([]slog.Attr, 0, record.NumAttrs())
+	idx = 0
+	record.Attrs(func(attr slog.Attr) bool {
+		switch {
+		case idx < firstChanged:
+			attrs = append(attrs, attr)
+		case idx == firstChanged:
+			attrs = append(attrs, firstReplacement)
+		default:
+			if replacement, ok := redactAttr(attr); ok {
+				attr = replacement
+			}
+			attrs = append(attrs, attr)
+		}
+		idx++
+		return true
+	})
 	clone := slog.NewRecord(record.Time, record.Level, record.Message, record.PC)
 	clone.AddAttrs(attrs...)
 	return r.handler.Handle(ctx, clone)
@@ -197,22 +290,27 @@ func redactAttrDepth(attr slog.Attr, depth int) (slog.Attr, bool) {
 	val := attr.Value.Resolve()
 	if val.Kind() == slog.KindGroup {
 		group := val.Group()
-		redacted := make([]slog.Attr, 0, len(group))
-		groupChanged := false
-		for _, sub := range group {
+		var redacted []slog.Attr
+		for i, sub := range group {
 			if replacement, ok := redactAttrDepth(sub, depth+1); ok {
-				sub = replacement
-				groupChanged = true
+				if redacted == nil {
+					redacted = slices.Clone(group)
+				}
+				redacted[i] = replacement
 			}
-			redacted = append(redacted, sub)
 		}
-		if !groupChanged && !wasLogValuer {
-			return attr, false
+		if redacted == nil {
+			if !wasLogValuer {
+				return attr, false
+			}
+			return slog.Attr{Key: attr.Key, Value: val}, true
 		}
 		return slog.Attr{Key: attr.Key, Value: slog.GroupValue(redacted...)}, true
 	}
-	if redactedVal, ok := redactAnyValue(val.Any(), depth+1); ok {
-		return slog.Attr{Key: attr.Key, Value: slog.AnyValue(redactedVal)}, true
+	if val.Kind() == slog.KindAny {
+		if redactedVal, ok := redactAnyValue(val.Any(), depth+1); ok {
+			return slog.Attr{Key: attr.Key, Value: slog.AnyValue(redactedVal)}, true
+		}
 	}
 	if wasLogValuer {
 		return slog.Attr{Key: attr.Key, Value: val}, true
@@ -226,82 +324,79 @@ func redactAnyValue(raw any, depth int) (any, bool) {
 	}
 	switch values := raw.(type) {
 	case map[string]string:
-		changed := false
-		redacted := make(map[string]string, len(values))
-		for name, value := range values {
+		var redacted map[string]string
+		for name := range values {
 			if isSecretHeader(name) {
+				if redacted == nil {
+					redacted = maps.Clone(values)
+				}
 				redacted[name] = "***"
-				changed = true
-				continue
 			}
-			redacted[name] = value
 		}
-		if !changed {
+		if redacted == nil {
 			return raw, false
 		}
 		return redacted, true
 	case http.Header:
-		changed := false
-		redacted := make(http.Header, len(values))
-		for name, vals := range values {
+		var redacted http.Header
+		for name := range values {
 			if isSecretHeader(name) {
+				if redacted == nil {
+					redacted = maps.Clone(values)
+				}
 				redacted[name] = []string{"***"}
-				changed = true
-				continue
 			}
-			redacted[name] = vals
 		}
-		if !changed {
+		if redacted == nil {
 			return raw, false
 		}
 		return redacted, true
 	case map[string][]string:
-		changed := false
-		redacted := make(map[string][]string, len(values))
-		for name, vals := range values {
+		var redacted map[string][]string
+		for name := range values {
 			if isSecretHeader(name) {
+				if redacted == nil {
+					redacted = maps.Clone(values)
+				}
 				redacted[name] = []string{"***"}
-				changed = true
-				continue
 			}
-			redacted[name] = vals
 		}
-		if !changed {
+		if redacted == nil {
 			return raw, false
 		}
 		return redacted, true
 	case map[string]any:
-		changed := false
-		redacted := make(map[string]any, len(values))
+		var redacted map[string]any
 		for name, val := range values {
 			if isSecretHeader(name) {
+				if redacted == nil {
+					redacted = maps.Clone(values)
+				}
 				redacted[name] = "***"
-				changed = true
 				continue
 			}
 			if nested, ok := redactAnyValue(val, depth+1); ok {
+				if redacted == nil {
+					redacted = maps.Clone(values)
+				}
 				redacted[name] = nested
-				changed = true
-				continue
 			}
-			redacted[name] = val
 		}
-		if !changed {
+		if redacted == nil {
 			return raw, false
 		}
 		return redacted, true
 	case []any:
-		changed := false
-		redacted := make([]any, len(values))
+		var redacted []any
 		for i, item := range values {
 			if nested, ok := redactAnyValue(item, depth+1); ok {
+				if redacted == nil {
+					redacted = slices.Clone(values)
+				}
 				redacted[i] = nested
-				changed = true
-				continue
 			}
-			redacted[i] = item
 		}
-		if !changed {
+		if redacted == nil {
 			return raw, false
 		}
 		return redacted, true

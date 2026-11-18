@@ -506,4 +506,20 @@ func TestCollectImagesFromHandlesCycles(t *testing.T) {
 	if _, ok := assets["ref-cycle"]; !ok {
 		t.Errorf("assets = %v, want ref-cycle", assets)
 	}
+
+	// Verify deep nesting beyond maxFastImageWalkDepth seamlessly falls back to reflect walking.
+	deepImg, err := NewImageWithRef("ref-deep-12", []byte("deep-data"), "png")
+	if err != nil {
+		t.Fatalf("NewImageWithRef failed: %v", err)
+	}
+	var deep any = []any{deepImg}
+	for range 12 {
+		deep = map[string]any{"next": deep}
+	}
+	if err := collectImagesFrom(deep, assets); err != nil {
+		t.Fatalf("collectImagesFrom(deep) failed: %v", err)
+	}
+	if _, ok := assets["ref-deep-12"]; !ok {
+		t.Errorf("assets = %v, want ref-deep-12", assets)
+	}
 }

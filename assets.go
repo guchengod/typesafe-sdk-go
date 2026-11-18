@@ -283,7 +283,12 @@ func newRandomRef(prefix string) string {
 }
 
 // imagePointerType is the type the walker recognizes as an image reference.
-var imagePointerType = reflect.TypeFor[*Image]()
+var (
+	imagePointerType         = reflect.TypeFor[*Image]()
+	questionExtraCarrierType = reflect.TypeFor[questionExtraCarrier]()
+)
+
+const maxFastImageWalkDepth = 8
 
 type questionExtraCarrier interface {
 	questionExtra() map[string]any
@@ -297,7 +302,181 @@ func collectImagesFrom(val any, assets map[string]any) error {
 	if val == nil || assets == nil {
 		return nil
 	}
-	return walkImages(reflect.ValueOf(val), assets, make(map[imageVisit]bool))
+	return collectImagesInto(val, &assets)
+}
+
+// collectImagesInto discovers embedded *Image instances into *assets, allocating the map lazily
+// only when at least one *Image is encountered. Common scalar, map, slice, and built-in Question
+// types take a zero-reflection fast path before falling back to reflect for arbitrary structs or
+// deeply nested / cyclic graphs.
+func collectImagesInto(val any, assets *map[string]any) error {
+	if val == nil || assets == nil {
+		return nil
+	}
+	var seen map[imageVisit]bool
+	return collectImagesFast(val, assets, 0, &seen)
+}
+
+func registerImageAsset(image *Image, assets *map[string]any) error {
+	if image == nil || image.Ref == "" {
+		return nil
+	}
+	if *assets == nil {
+		*assets = make(map[string]any, 2)
+	}
+	incoming := image.Asset()
+	if existing, exists := (*assets)[image.Ref]; exists && !sameAssetPayload(existing, incoming) {
+		return &SDKError{
+			Message: fmt.Sprintf("Conflicting image assets share reference %q.", image.Ref),
+		}
+	}
+	(*assets)[image.Ref] = incoming
+	return nil
+}
+
+func collectImagesFast(val any, assets *map[string]any, depth int, seen *map[imageVisit]bool) error {
+	if val == nil {
+		return nil
+	}
+	if depth >= maxFastImageWalkDepth {
+		return walkImages(reflect.ValueOf(val), assets, seen)
+	}
+	switch typed := val.(type) {
+	case string, bool, int, int64, int32, int16, int8, uint, uint64, uint32, uint16, uint8,
+		float64, float32, []byte, []string, map[string]string, map[string]int, map[string]float64, map[string]bool:
+		return nil
+	case *Image:
+		return registerImageAsset(typed, assets)
+	case []*Image:
+		for _, img := range typed {
+			if err := registerImageAsset(img, assets); err != nil {
+				return err
+			}
+		}
+		return nil
+	case []any:
+		for _, item := range typed {
+			if err := collectImagesFast(item, assets, depth+1, seen); err != nil {
+				return err
+			}
+		}
+		return nil
+	case map[string]any:
+		for _, item := range typed {
+			if err := collectImagesFast(item, assets, depth+1, seen); err != nil {
+				return err
+			}
+		}
+		return nil
+	case Questions:
+		for _, item := range typed {
+			if err := collectImagesFast(item, assets, depth+1, seen); err != nil {
+				return err
+			}
+		}
+		return nil
+	case RawQuestion:
+		for _, item := range typed {
+			if err := collectImagesFast(item, assets, depth+1, seen); err != nil {
+				return err
+			}
+		}
+		return nil
+	case *NoulCriteria:
+		if typed == nil {
+			return nil
+		}
+		if err := collectImagesFast(typed.True, assets, depth+1, seen); err != nil {
+			return err
+		}
+		return collectImagesFast(typed.False, assets, depth+1, seen)
+	case NoulCriteria:
+		if err := collectImagesFast(typed.True, assets, depth+1, seen); err != nil {
+			return err
+		}
+		return collectImagesFast(typed.False, assets, depth+1, seen)
+	case *NoulQuestion:
+		if typed == nil {
+			return nil
+		}
+		return collectNoulQuestionImages(*typed, assets, depth+1, seen)
+	case NoulQuestion:
+		return collectNoulQuestionImages(typed, assets, depth+1, seen)
+	case *ChoiceQuestion:
+		if typed == nil {
+			return nil
+		}
+		return collectChoiceQuestionImages(*typed, assets, depth+1, seen)
+	case ChoiceQuestion:
+		return collectChoiceQuestionImages(typed, assets, depth+1, seen)
+	case *ScoreQuestion:
+		if typed == nil {
+			return nil
+		}
+		return collectScoreQuestionImages(*typed, assets, depth+1, seen)
+	case ScoreQuestion:
+		return collectScoreQuestionImages(typed, assets, depth+1, seen)
+	case *BoxQuestion:
+		if typed == nil {
+			return nil
+		}
+		return collectBoxQuestionImages(*typed, assets, depth+1, seen)
+	case BoxQuestion:
+		return collectBoxQuestionImages(typed, assets, depth+1, seen)
+	default:
+		return walkImages(reflect.ValueOf(val), assets, seen)
+	}
+}
+
+func collectNoulQuestionImages(q NoulQuestion, assets *map[string]any, depth int, seen *map[imageVisit]bool) error {
+	if err := collectImagesFast(q.Instructions, assets, depth, seen); err != nil {
+		return err
+	}
+	if q.Criteria != nil {
+		if err := collectImagesFast(q.Criteria, assets, depth, seen); err != nil {
+			return err
+		}
+	}
+	if len(q.extra) > 0 {
+		return collectImagesFast(q.extra, assets, depth, seen)
+	}
+	return nil
+}
+
+func collectChoiceQuestionImages(q ChoiceQuestion, assets *map[string]any, depth int, seen *map[imageVisit]bool) error {
+	if err := collectImagesFast(q.Criteria, assets, depth, seen); err != nil {
+		return err
+	}
+	if err := collectImagesFast(q.Instructions, assets, depth, seen); err != nil {
+		return err
+	}
+	if len(q.extra) > 0 {
+		return collectImagesFast(q.extra, assets, depth, seen)
+	}
+	return nil
+}
+
+func collectScoreQuestionImages(q ScoreQuestion, assets *map[string]any, depth int, seen *map[imageVisit]bool) error {
+	if err := collectImagesFast(q.Criteria, assets, depth, seen); err != nil {
+		return err
+	}
+	if err := collectImagesFast(q.Instructions, assets, depth, seen); err != nil {
+		return err
+	}
+	if len(q.extra) > 0 {
+		return collectImagesFast(q.extra, assets, depth, seen)
+	}
+	return nil
+}
+
+func collectBoxQuestionImages(q BoxQuestion, assets *map[string]any, depth int, seen *map[imageVisit]bool) error {
+	if err := collectImagesFast(q.Instructions, assets, depth, seen); err != nil {
+		return err
+	}
+	if len(q.extra) > 0 {
+		return collectImagesFast(q.extra, assets, depth, seen)
+	}
+	return nil
 }
 
 // imageVisit identifies a reference-typed value the walker has already visited, so a cyclic value
@@ -308,21 +487,15 @@ type imageVisit struct {
 	length int
 }
 
-// walkImages recurses through value, collecting every reachable *Image into assets.
-func walkImages(value reflect.Value, assets map[string]any, seen map[imageVisit]bool) error {
+// walkImages recurses through value, collecting every reachable *Image into *assets.
+func walkImages(value reflect.Value, assets *map[string]any, seen *map[imageVisit]bool) error {
 	if !value.IsValid() {
 		return nil
 	}
 	if value.Type() == imagePointerType {
 		if value.CanInterface() {
-			if image, ok := value.Interface().(*Image); ok && image != nil && image.Ref != "" {
-				incoming := image.Asset()
-				if existing, exists := assets[image.Ref]; exists && !sameAssetPayload(existing, incoming) {
-					return &SDKError{
-						Message: fmt.Sprintf("Conflicting image assets share reference %q.", image.Ref),
-					}
-				}
-				assets[image.Ref] = incoming
+			if image, ok := value.Interface().(*Image); ok {
+				return registerImageAsset(image, assets)
 			}
 		}
 		return nil
@@ -364,7 +537,8 @@ func walkImages(value reflect.Value, assets map[string]any, seen map[imageVisit]
 			}
 		}
 	case reflect.Struct:
-		if value.CanInterface() {
+		typ := value.Type()
+		if typ.Implements(questionExtraCarrierType) && value.CanInterface() {
 			if carrier, ok := value.Interface().(questionExtraCarrier); ok {
 				if extra := carrier.questionExtra(); len(extra) > 0 {
 					if err := walkImages(reflect.ValueOf(extra), assets, seen); err != nil {
@@ -373,10 +547,12 @@ func walkImages(value reflect.Value, assets map[string]any, seen map[imageVisit]
 				}
 			}
 		}
-		for structField, field := range value.Fields() {
+		numFields := typ.NumField()
+		for i := range numFields {
+			structField := typ.Field(i)
 			// Unexported fields and fields tagged `json:"-"` are not part of the JSON wire form.
-			if field.CanInterface() && !jsonIgnored(structField) {
-				if err := walkImages(field, assets, seen); err != nil {
+			if structField.IsExported() && !jsonIgnored(structField) {
+				if err := walkImages(value.Field(i), assets, seen); err != nil {
 					return err
 				}
 			}
@@ -409,15 +585,18 @@ func jsonIgnored(field reflect.StructField) bool {
 }
 
 // alreadySeen records a reference-typed value and reports whether it was visited before.
-func alreadySeen(value reflect.Value, seen map[imageVisit]bool) bool {
+func alreadySeen(value reflect.Value, seen *map[imageVisit]bool) bool {
+	if *seen == nil {
+		*seen = make(map[imageVisit]bool, 8)
+	}
 	length := 0
 	if value.Kind() == reflect.Slice {
 		length = value.Len()
 	}
 	key := imageVisit{typ: value.Type(), ptr: value.Pointer(), length: length}
-	if seen[key] {
+	if (*seen)[key] {
 		return true
 	}
-	seen[key] = true
+	(*seen)[key] = true
 	return false
 }

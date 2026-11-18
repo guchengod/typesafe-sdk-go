@@ -158,7 +158,7 @@ func BenchmarkQuestionsEncode(b *testing.B) {
 // BenchmarkRequestHeaders measures header construction for a request that carries both default
 // headers and per-call headers, with a caller-supplied retry count that must be stripped.
 //
-// Allocs/op: 21 (1.1 KB).
+// Allocs/op: 16 (1.0 KB).
 func BenchmarkRequestHeaders(b *testing.B) {
 	config := &Config{
 		APIKey:       "bench-key",
@@ -239,7 +239,7 @@ func BenchmarkBackoff(b *testing.B) {
 // decoding. The transport answers in process, so the number is the SDK's own overhead with the
 // network removed.
 //
-// Allocs/op: 210 (15.5 KB).
+// Allocs/op: 165 (12.7 KB).
 func BenchmarkClientSystemOne(b *testing.B) {
 	client, transport := benchmarkMockClient(b, fixedAnswerResponse)
 	questions := fixedQuestions()

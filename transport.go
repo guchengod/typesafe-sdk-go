@@ -12,10 +12,27 @@ import (
 	"log/slog"
 	"net"
 	"net/http"
+	"net/textproto"
 	"net/url"
 	"strconv"
 	"sync"
 	"time"
+)
+
+// Pre-canonicalized MIME header keys avoid per-request allocations inside textproto.CanonicalMIMEHeaderKey
+// for mixed-case SDK header constants such as "X-TypeSafe-SDK" and "TypeSafe-Danger-Zone-Images".
+var (
+	canonAuthorization         = textproto.CanonicalMIMEHeaderKey(HeaderAuthorization)
+	canonAccept                = textproto.CanonicalMIMEHeaderKey(HeaderAccept)
+	canonContentType           = textproto.CanonicalMIMEHeaderKey(HeaderContentType)
+	canonUserAgent             = textproto.CanonicalMIMEHeaderKey(HeaderUserAgent)
+	canonSDK                   = textproto.CanonicalMIMEHeaderKey(HeaderSDK)
+	canonRuntime               = textproto.CanonicalMIMEHeaderKey(HeaderRuntime)
+	canonRetryCount            = textproto.CanonicalMIMEHeaderKey(HeaderRetryCount)
+	canonRequestID             = textproto.CanonicalMIMEHeaderKey(HeaderRequestID)
+	canonDangerZoneImages      = textproto.CanonicalMIMEHeaderKey(HeaderDangerZoneImages)
+	canonDangerZoneLongContext = textproto.CanonicalMIMEHeaderKey(HeaderDangerZoneLongContext)
+	canonContentEncoding       = textproto.CanonicalMIMEHeaderKey(HeaderContentEncoding)
 )
 
 // newSecureHTTPTransport returns the transport the SDK uses when the caller supplies neither an
@@ -79,7 +96,10 @@ func execute(ctx context.Context, config *Config, httpClient *http.Client, req r
 
 	targetURL := config.BaseURL + req.path
 	safeURL := cleanURL(targetURL)
-	endpoint := cleanEndpoint(req.method, targetURL)
+	var endpoint string
+	if safeURL != "" {
+		endpoint = req.method + " " + safeURL
+	}
 
 	var body []byte
 	var logBody []byte
@@ -129,9 +149,13 @@ func execute(ctx context.Context, config *Config, httpClient *http.Client, req r
 		if err != nil {
 			return &SDKError{Message: "Failed to create HTTP request", Cause: err}
 		}
-		httpReq.Header = header.Clone()
+		if policy.MaxRetries > 0 {
+			httpReq.Header = header.Clone()
+		} else {
+			httpReq.Header = header
+		}
 		if attempt > 0 {
-			httpReq.Header.Set(HeaderRetryCount, strconv.Itoa(attempt))
+			httpReq.Header[canonRetryCount] = []string{strconv.Itoa(attempt)}
 			if logger.Enabled(attemptCtx, slog.LevelInfo) {
 				logger.LogAttrs(attemptCtx, slog.LevelInfo, "request.retry",
 					slog.String("method", req.method), slog.String("url", safeURL), slog.Int("attempt", attempt))
@@ -162,7 +186,7 @@ func execute(ctx context.Context, config *Config, httpClient *http.Client, req r
 			return failure
 		}
 
-		requestID := httpResp.Header.Get(HeaderRequestID)
+		requestID := httpResp.Header.Get(canonRequestID)
 		logResponse(attemptCtx, logger, req.method, safeURL, httpResp.StatusCode, time.Since(started), requestID, httpResp.Header, payload)
 
 		if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
@@ -195,6 +219,7 @@ func execute(ctx context.Context, config *Config, httpClient *http.Client, req r
 // SDK's own headers. Client identification and credentials are applied last, so a caller can
 // never displace them, whatever the case they spell a header name in.
 func buildHeaders(config *Config, req request, hasBody, isCompressed bool) http.Header {
+	hasCallerHeaders := len(config.DefaultHeaders) > 0 || len(req.headers) > 0
 	header := make(http.Header, len(config.DefaultHeaders)+len(req.headers)+7)
 	for name, values := range config.DefaultHeaders {
 		for _, value := range values {
@@ -204,16 +229,20 @@ func buildHeaders(config *Config, req request, hasBody, isCompressed bool) http.
 	for name, value := range req.headers {
 		header.Set(name, value)
 	}
-	header.Del(HeaderDangerZoneLongContext)
-	header.Del(HeaderDangerZoneImages)
-	header.Del(HeaderContentEncoding)
+	if hasCallerHeaders {
+		delete(header, canonDangerZoneLongContext)
+		delete(header, canonDangerZoneImages)
+		delete(header, canonContentEncoding)
+		// A caller-supplied retry count would misreport the attempt number to the server.
+		delete(header, canonRetryCount)
+	}
 
 	effectiveLongContext := config.LongContext
 	if req.longContext != nil {
 		effectiveLongContext = *req.longContext
 	}
 	if effectiveLongContext {
-		header.Set(HeaderDangerZoneLongContext, "true")
+		header[canonDangerZoneLongContext] = []string{"true"}
 	}
 
 	effectiveImages := config.Images
@@ -221,21 +250,20 @@ func buildHeaders(config *Config, req request, hasBody, isCompressed bool) http.
 		effectiveImages = *req.images
 	}
 	if effectiveImages {
-		header.Set(HeaderDangerZoneImages, "true")
+		header[canonDangerZoneImages] = []string{"true"}
 	}
 
-	// A caller-supplied retry count would misreport the attempt number to the server.
-	header.Del(HeaderRetryCount)
-	header.Set(HeaderAuthorization, "Bearer "+config.APIKey)
-	header.Set(HeaderAccept, ContentTypeJSON)
-	header.Set(HeaderUserAgent, sdkUserAgent())
-	header.Set(HeaderSDK, sdkUserAgent())
-	header.Set(HeaderRuntime, RuntimeString())
+	header[canonAuthorization] = []string{"Bearer " + config.APIKey}
+	header[canonAccept] = []string{ContentTypeJSON}
+	ua := sdkUserAgent()
+	header[canonUserAgent] = []string{ua}
+	header[canonSDK] = []string{ua}
+	header[canonRuntime] = []string{RuntimeString()}
 	if hasBody {
-		header.Set(HeaderContentType, ContentTypeJSON)
+		header[canonContentType] = []string{ContentTypeJSON}
 	}
 	if isCompressed {
-		header.Set(HeaderContentEncoding, EncodingGzip)
+		header[canonContentEncoding] = []string{EncodingGzip}
 	}
 	return header
 }
