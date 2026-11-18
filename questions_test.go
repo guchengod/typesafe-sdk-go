@@ -6,8 +6,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"net/http"
-	"sort"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -61,8 +62,7 @@ func questionsAssertError(t *testing.T, err error, want string) {
 	if err.Error() != want {
 		t.Errorf("error = %q, want %q", err.Error(), want)
 	}
-	var marker TypeSafeError
-	if !errors.As(err, &marker) {
+	if _, ok := errors.AsType[TypeSafeError](err); !ok {
 		t.Errorf("error of type %T does not implement TypeSafeError", err)
 	}
 }
@@ -105,11 +105,7 @@ func answeringQuestionsJSON(t *testing.T, request *http.Request) string {
 		Questions map[string]jsontext.Value `json:"questions"`
 	}
 	_ = jsonv2.Unmarshal(body, &sent)
-	names := make([]string, 0, len(sent.Questions))
-	for name := range sent.Questions {
-		names = append(names, name)
-	}
-	sort.Strings(names)
+	names := slices.Sorted(maps.Keys(sent.Questions))
 	answers := make([]string, 0, len(names))
 	for _, name := range names {
 		key, err := jsonv2.Marshal(name, marshalOptions)
@@ -781,8 +777,8 @@ func TestNormalizeQuestionsScoreCriteriaValidation(t *testing.T) {
 		t.Run("rejects "+test.name, func(t *testing.T) {
 			_, err := NormalizeQuestions(map[string]any{"q": test.value})
 			questionsAssertError(t, err, want)
-			var scoreErr *ScoreError
-			if !errors.As(err, &scoreErr) {
+			scoreErr, ok := errors.AsType[*ScoreError](err)
+			if !ok {
 				t.Fatalf("error = %T, want *ScoreError", err)
 			}
 			if scoreErr.Name != "q" {
@@ -900,8 +896,7 @@ func TestScoreErrorTextAndMarker(t *testing.T) {
 	if err.Error() != want {
 		t.Errorf("Error() = %q, want %q", err.Error(), want)
 	}
-	var marker TypeSafeError
-	if !errors.As(err, &marker) {
+	if _, ok := errors.AsType[TypeSafeError](err); !ok {
 		t.Errorf("*ScoreError does not implement TypeSafeError")
 	}
 

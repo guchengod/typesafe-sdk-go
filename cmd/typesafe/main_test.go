@@ -2,7 +2,6 @@ package main
 
 import (
 	"bytes"
-	"context"
 	jsonv2 "encoding/json/v2"
 	"fmt"
 	"io"
@@ -118,7 +117,7 @@ func runCLI(t *testing.T, api *cliAPI, stdin string, args ...string) cliResult {
 	full := append([]string{"--api-key", "test-key", "--base-url", api.server.URL}, args...)
 
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), full, &stdout, &stderr, strings.NewReader(stdin))
+	code := run(t.Context(), full, &stdout, &stderr, strings.NewReader(stdin))
 	return cliResult{code: code, stdout: stdout.String(), stderr: stderr.String()}
 }
 
@@ -142,7 +141,7 @@ func respondJSON(payload string, status int) func(http.ResponseWriter, *http.Req
 
 func TestNoCommandPrintsUsage(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), nil, &stdout, &stderr, strings.NewReader(""))
+	code := run(t.Context(), nil, &stdout, &stderr, strings.NewReader(""))
 
 	if code != exitUsage {
 		t.Errorf("exit code = %d, want %d", code, exitUsage)
@@ -157,7 +156,7 @@ func TestNoCommandPrintsUsage(t *testing.T) {
 
 func TestUnknownCommand(t *testing.T) {
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"sing"}, &stdout, &stderr, strings.NewReader(""))
+	code := run(t.Context(), []string{"sing"}, &stdout, &stderr, strings.NewReader(""))
 
 	if code != exitUsage {
 		t.Errorf("exit code = %d, want %d", code, exitUsage)
@@ -170,7 +169,7 @@ func TestUnknownCommand(t *testing.T) {
 func TestHelpAndVersion(t *testing.T) {
 	for _, args := range [][]string{{"help"}, {"--help"}, {"-h"}} {
 		var stdout, stderr bytes.Buffer
-		if code := run(context.Background(), args, &stdout, &stderr, strings.NewReader("")); code != exitOK {
+		if code := run(t.Context(), args, &stdout, &stderr, strings.NewReader("")); code != exitOK {
 			t.Errorf("run(%v) exit code = %d, want 0", args, code)
 		}
 		if !strings.Contains(stdout.String(), "typesafe - ask TypeSafe AI questions") {
@@ -180,7 +179,7 @@ func TestHelpAndVersion(t *testing.T) {
 
 	for _, args := range [][]string{{"version"}, {"--version"}, {"-v"}} {
 		var stdout, stderr bytes.Buffer
-		if code := run(context.Background(), args, &stdout, &stderr, strings.NewReader("")); code != exitOK {
+		if code := run(t.Context(), args, &stdout, &stderr, strings.NewReader("")); code != exitOK {
 			t.Errorf("run(%v) exit code = %d, want 0", args, code)
 		}
 		if !strings.Contains(stdout.String(), "typesafe ") || !strings.Contains(stdout.String(), "go/") {
@@ -395,14 +394,22 @@ func TestAskAPIErrorExitCode(t *testing.T) {
 }
 
 func TestAskConnectionErrorExitCode(t *testing.T) {
-	// A server that is closed immediately: the request never reaches the API.
-	server := httptest.NewServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
-	url := server.URL
-	server.Close()
+	// An in-memory test server that aborts the connection mid-flight: exercises NewTestServer's
+	// fake network transport without binding an OS socket or waiting on a dial timeout.
+	server := httptest.NewTestServer(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
+		panic(http.ErrAbortHandler)
+	}))
+	client := server.Client()
+	saved := clientOptions
+	clientOptions = []typesafe.Option{
+		typesafe.WithTransport(client.Transport),
+		typesafe.WithAllowInsecureHTTP(true),
+	}
+	t.Cleanup(func() { clientOptions = saved })
 
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(),
-		[]string{"ask", "--api-key", "k", "--base-url", url, "--state", "x", "--noul", "q=Is this spam?", "--retries", "0"},
+	code := run(t.Context(),
+		[]string{"ask", "--api-key", "k", "--base-url", server.URL, "--state", "x", "--noul", "q=Is this spam?", "--retries", "0"},
 		&stdout, &stderr, strings.NewReader(""))
 
 	if code != exitConnection {
@@ -476,7 +483,7 @@ func TestEnvConfiguration(t *testing.T) {
 	t.Setenv("TYPESAFE_BASE_URL", api.server.URL)
 
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(),
+	code := run(t.Context(),
 		[]string{"ask", "--state", "hello", "--questions", "@" + questionFile},
 		&stdout, &stderr, strings.NewReader(""))
 
@@ -508,7 +515,7 @@ func TestGlobalFlagsBeforeTheCommand(t *testing.T) {
 	api := newCLIAPI(t, respondJSON(cliAnswerPayload, http.StatusOK))
 
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(),
+	code := run(t.Context(),
 		[]string{"--api-key", "before-key", "--base-url", api.server.URL, "ask", "--state", "hello", "--noul", "billing=?"},
 		&stdout, &stderr, strings.NewReader(""))
 
@@ -526,7 +533,7 @@ func TestCommandFlagsWinOverGlobalFlags(t *testing.T) {
 	second := newCLIAPI(t, respondJSON(modelsPayload, http.StatusOK))
 
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(),
+	code := run(t.Context(),
 		[]string{"--api-key", "k", "--base-url", first.server.URL, "models", "--base-url", second.server.URL},
 		&stdout, &stderr, strings.NewReader(""))
 
@@ -545,7 +552,7 @@ func TestMissingAPIKeyIsAUsageError(t *testing.T) {
 	t.Setenv("TYPESAFE_API_KEY", "")
 
 	var stdout, stderr bytes.Buffer
-	code := run(context.Background(), []string{"models"}, &stdout, &stderr, strings.NewReader(""))
+	code := run(t.Context(), []string{"models"}, &stdout, &stderr, strings.NewReader(""))
 
 	if code != exitUsage {
 		t.Errorf("exit code = %d, want %d", code, exitUsage)

@@ -10,6 +10,7 @@ import (
 	"math"
 	"net/http"
 	"strconv"
+	"strings"
 )
 
 // Usage reports the token counts for a request.
@@ -182,13 +183,10 @@ func (b BoxCoordinates) Bounds(width, height int) image.Rectangle {
 		return image.Rectangle{}
 	}
 	clampUnit := func(v float64) float64 {
-		if !isFinite(v) || v < 0 {
+		if !isFinite(v) {
 			return 0
 		}
-		if v > 1 {
-			return 1
-		}
-		return v
+		return min(max(v, 0), 1)
 	}
 	left := clampUnit(b.Left)
 	right := clampUnit(b.Right)
@@ -460,14 +458,12 @@ func newDecoder(resp *response) *decoder {
 // match the expected schema, naming the offending field.
 func newValidationError(resp *response, path string) error {
 	return &APIResponseValidationError{
-		APIError: APIError{
-			Status:    resp.StatusCode,
-			Body:      decodeErrorBody(resp.Body),
-			RawBody:   resp.Body,
-			Headers:   resp.Header,
-			Endpoint:  resp.Endpoint,
-			RequestID: resp.RequestID,
-		},
+		Status:    resp.StatusCode,
+		Body:      decodeErrorBody(resp.Body),
+		RawBody:   resp.Body,
+		Headers:   resp.Header,
+		Endpoint:  resp.Endpoint,
+		RequestID: resp.RequestID,
 		FieldPath: path,
 	}
 }
@@ -926,13 +922,14 @@ func integerMap(fields map[string]jsontext.Value, field, name string, d *decoder
 // answerPath renders the dotted field path for an answer field, dropping any trailing empty
 // segment so the path stays stable when the offending key is unknown.
 func answerPath(name string, segments ...string) string {
-	path := "answers." + name
+	var path strings.Builder
+	path.WriteString("answers." + name)
 	for _, segment := range segments {
 		if segment != "" {
-			path += "." + segment
+			path.WriteString("." + segment)
 		}
 	}
-	return path
+	return path.String()
 }
 
 // modelsEnvelope is the shape of a List Models success payload. The field name is part of the

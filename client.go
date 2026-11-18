@@ -1,6 +1,7 @@
 package typesafe
 
 import (
+	"cmp"
 	"io"
 	"net/http"
 	"net/url"
@@ -136,10 +137,7 @@ func (c *Client) Close() error {
 		return nil
 	}
 	c.closeOnce.Do(func() {
-		active := c.execClient
-		if active == nil {
-			active = c.httpClient
-		}
+		active := cmp.Or(c.execClient, c.httpClient)
 		if active == nil || active.Transport == nil {
 			return
 		}

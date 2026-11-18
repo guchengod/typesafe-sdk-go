@@ -1,6 +1,7 @@
 package typesafe
 
 import (
+	"cmp"
 	"encoding/json/jsontext"
 	"reflect"
 	"slices"
@@ -14,8 +15,8 @@ func typeOf[T any]() reflect.Type { return reflect.TypeFor[T]() }
 // response document does not contain, or "" when every required field is present.
 //
 // A field is required unless it can represent absence — a pointer, map, slice, or interface
-// holds nil for "not reported" — or it is tagged `omitempty`, or it is untagged, embedded, or
-// unexported. Only the top level is inspected: nested structures decode with standard
+// holds nil for "not reported" — or it is tagged `omitzero` or `omitempty`, or it is untagged,
+// embedded, or unexported. Only the top level is inspected: nested structures decode with standard
 // encoding/json/v2 semantics, where a missing field leaves the zero value.
 func missingRequiredField(document map[string]jsontext.Value, target reflect.Type) string {
 	// Stack-backed seen slice avoids heap map allocation on flat and shallowly embedded structs.
@@ -100,8 +101,6 @@ func jsonFieldName(field reflect.StructField) (string, bool) {
 	if name == "-" {
 		return "", false
 	}
-	if name == "" {
-		name = field.Name
-	}
+	name = cmp.Or(name, field.Name)
 	return name, strings.Contains(options, "omitempty") || strings.Contains(options, "omitzero")
 }

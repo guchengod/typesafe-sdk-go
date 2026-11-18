@@ -147,24 +147,20 @@ func (p *RetryPolicy) isRetryable(err error) bool {
 	if err == nil {
 		return false
 	}
-	var timeoutErr *APITimeoutError
-	if errors.As(err, &timeoutErr) {
+	if _, ok := errors.AsType[*APITimeoutError](err); ok {
 		if p.APITimeoutError {
 			return true
 		}
-	} else {
-		var connectionErr *APIConnectionError
-		if errors.As(err, &connectionErr) && p.APIConnectionError {
-			return true
-		}
+	} else if _, ok := errors.AsType[*APIConnectionError](err); ok && p.APIConnectionError {
+		return true
 	}
 	if apiErr, ok := AsAPIError(err); ok && p.HTTPStatuses[apiErr.Status] {
 		return true
 	}
-	for _, target := range p.RetryErrors {
-		if errors.Is(err, target) {
-			return true
-		}
+	if slices.ContainsFunc(p.RetryErrors, func(target error) bool {
+		return errors.Is(err, target)
+	}) {
+		return true
 	}
 	return p.Predicate != nil && p.Predicate(err)
 }
@@ -194,13 +190,7 @@ func (p *RetryPolicy) backoff(attempt int) time.Duration {
 
 	delay := exponential * (1 - sample*jitter)
 	// Milliseconds of resolution match the SDK's documented backoff granularity.
-	delay = math.Round(delay*1000) / 1000
-	if delay < 0 {
-		delay = 0
-	}
-	if delay > exponential {
-		delay = exponential
-	}
+	delay = min(max(math.Round(delay*1000)/1000, 0), exponential)
 	return time.Duration(delay * float64(time.Second))
 }
 
@@ -208,8 +198,7 @@ func (p *RetryPolicy) backoff(attempt int) time.Duration {
 // honored under this policy, and no longer than MaxRetryAfter, else the computed backoff.
 func (p *RetryPolicy) delay(attempt int, lastErr error) time.Duration {
 	if p.RespectRetryAfter {
-		var apiErr *APIError
-		if errors.As(lastErr, &apiErr) {
+		if apiErr, ok := errors.AsType[*APIError](lastErr); ok {
 			serverDelay, ok := parseRetryAfter(apiErr.Headers)
 			if ok && (p.MaxRetryAfter <= 0 || serverDelay <= p.MaxRetryAfter) {
 				return serverDelay

@@ -538,9 +538,7 @@ func buildQuestions(source questionInputSpec, stdin io.Reader, stdinUsed bool, n
 			}
 			return nil, fmt.Errorf("--questions must be a JSON object of name to question: %w", err)
 		}
-		for name, question := range decoded {
-			named[name] = question
-		}
+		maps.Copy(named, decoded)
 	}
 
 	add := func(name string, question any) error {
@@ -624,7 +622,7 @@ func splitSpec(spec string) (string, string, error) {
 // parseLabels turns "calm,angry:A hostile message" into choice criteria.
 func parseLabels(value string) (map[string]any, error) {
 	criteria := map[string]any{}
-	for _, entry := range strings.Split(value, ",") {
+	for entry := range strings.SplitSeq(value, ",") {
 		entry = strings.TrimSpace(entry)
 		if entry == "" {
 			continue
@@ -649,7 +647,7 @@ func parseLabels(value string) (map[string]any, error) {
 // parseLevels turns "routine,elevated,critical" into an ordered rubric.
 func parseLevels(value string) ([]any, error) {
 	var levels []any
-	for _, entry := range strings.Split(value, ",") {
+	for entry := range strings.SplitSeq(value, ",") {
 		entry = strings.TrimSpace(entry)
 		if entry == "" {
 			continue
@@ -665,10 +663,10 @@ func parseLevels(value string) ([]any, error) {
 // loadInput reads a flag value that may be inline, a file reference, or stdin.
 // It returns nil for an empty value.
 func loadInput(value string, stdin io.Reader, stdinUsed bool) (any, bool, error) {
-	switch {
-	case value == "":
+	switch value {
+	case "":
 		return nil, stdinUsed, nil
-	case value == "-":
+	case "-":
 		if stdinUsed {
 			return nil, stdinUsed, errors.New("stdin (-) cannot be read by multiple flags")
 		}
@@ -677,16 +675,15 @@ func loadInput(value string, stdin io.Reader, stdinUsed bool) (any, bool, error)
 			return nil, true, fmt.Errorf("reading stdin: %w", err)
 		}
 		return content, true, nil
-	case strings.HasPrefix(value, "@"):
-		path := strings.TrimPrefix(value, "@")
+	}
+	if path, ok := strings.CutPrefix(value, "@"); ok {
 		content, err := readRegularFileBounded(path, typesafe.MaxRequestBodyLimit)
 		if err != nil {
 			return nil, stdinUsed, err
 		}
 		return content, stdinUsed, nil
-	default:
-		return value, stdinUsed, nil
 	}
+	return value, stdinUsed, nil
 }
 
 func loadFileOrStdin(path string, stdin io.Reader, stdinUsed bool) (any, bool, error) {

@@ -3,6 +3,7 @@ package main
 import (
 	"io"
 	"net/http"
+	"slices"
 	"strings"
 	"testing"
 
@@ -57,7 +58,7 @@ func BenchmarkRunAsk(b *testing.B) {
 
 	for _, format := range []string{"json", "text"} {
 		b.Run("format="+format, func(b *testing.B) {
-			args := append(append([]string(nil), baseArgs...), "--format", format)
+			args := slices.Concat(baseArgs, []string{"--format", format})
 			ctx := b.Context()
 			b.ReportAllocs()
 			for b.Loop() {

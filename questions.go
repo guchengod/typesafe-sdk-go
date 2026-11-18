@@ -4,6 +4,7 @@ import (
 	"encoding/json/jsontext"
 	jsonv2 "encoding/json/v2"
 	"fmt"
+	"maps"
 	"reflect"
 	"strings"
 )
@@ -63,7 +64,7 @@ func WithInstructions(instructions any) QuestionOption {
 
 // WithNoulCriteria sets the criteria describing the yes and no outcomes of a noul question.
 func WithNoulCriteria(criteria NoulCriteria) QuestionOption {
-	return func(o *questionOptions) { o.criteria = &criteria }
+	return func(o *questionOptions) { o.criteria = new(criteria) }
 }
 
 // WithQuestionField adds a field to a question's wire form. It exists for forward compatibility
@@ -541,8 +542,6 @@ func marshalWithExtra(question any, extra map[string]any) ([]byte, error) {
 	if err := jsonv2.Unmarshal(encoded, &fields, unmarshalOptions); err != nil {
 		return nil, err
 	}
-	for key, value := range extra {
-		fields[key] = value
-	}
+	maps.Copy(fields, extra)
 	return jsonv2.Marshal(fields, marshalOptions)
 }

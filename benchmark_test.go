@@ -88,12 +88,7 @@ func benchmarkAnswerIDs(b *testing.B, body string) []string {
 	if err := jsonv2.Unmarshal([]byte(body), &document); err != nil {
 		b.Fatalf("benchmark payload is not valid JSON: %v", err)
 	}
-	names := make([]string, 0, len(document.Answers))
-	for name := range document.Answers {
-		names = append(names, name)
-	}
-	slices.Sort(names)
-	return names
+	return slices.Sorted(maps.Keys(document.Answers))
 }
 
 // BenchmarkSystemOneResponseDecode measures decoding a System One success payload: once for the

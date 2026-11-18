@@ -10,6 +10,7 @@ import (
 	"os"
 	"slices"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -273,19 +274,19 @@ func loggingTestCaptureStderr(t *testing.T, fn func()) string {
 	os.Stderr = writer
 	defer func() { os.Stderr = original }()
 
-	collected := make(chan string, 1)
-	go func() {
-		var buffer bytes.Buffer
+	var buffer bytes.Buffer
+	var wg sync.WaitGroup
+	wg.Go(func() {
 		_, _ = io.Copy(&buffer, reader)
-		collected <- buffer.String()
-	}()
+	})
 
 	fn()
 
 	if err := writer.Close(); err != nil {
 		t.Errorf("closing the captured stderr: %v", err)
 	}
-	output := <-collected
+	wg.Wait()
+	output := buffer.String()
 	_ = reader.Close()
 	return output
 }

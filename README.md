@@ -17,7 +17,7 @@
 - **自动透明压缩**：请求体 $\ge 1\text{ KiB}$ 自动启用标准 Gzip 压缩，大幅缩减网络带宽和传输延迟。
 - **原生多模态与目标定位**：全面支持 `Image` 图片资产与 `Box` 图像目标检测边界框问答。
 - **健壮默认重试**：基于指数退避加抖动的自适应重试，深度支持服务端 `Retry-After` 标头。
-- **强类型设计**：全链路结构体类型支持，可配合 `errors.As` 提取细分错误，亦可通过 `SystemOneAs[T]` 反序列化到自定义业务结构体。
+- **强类型设计**：全链路结构体类型支持，可配合 `errors.AsType[T]` 提取细分错误，亦可通过 `client.SystemOneAs[T]` 反序列化到自定义业务结构体。
 - **开箱即用 CLI**：附带纯标准库打造的命令行工具 `cmd/typesafe`，完美适配 Shell 脚本与流水线。
 
 > 需要 **Go 1.27.3 或更高版本**。
@@ -182,19 +182,19 @@ func main() {
 
 ## 结构化泛型解码 (`SystemOneAs`)
 
-使用 `SystemOneAs[T]` 可直接将返回结果映射到自定义业务结构体中：
+使用泛型方法 `client.SystemOneAs[T]`（或兼容包级函数 `typesafe.SystemOneAs[T]`）可直接将返回结果映射到自定义业务结构体中：
 
 ```go
 type TicketAnalysis struct {
-	Model    string                  `json:"model"`
-	Usage    typesafe.Usage          `json:"usage"`
-	Billing  typesafe.NoulAnswer     `json:"billing"`
-	Category typesafe.ChoiceAnswer   `json:"category"`
-	Urgency  typesafe.ScoreAnswer    `json:"urgency"`
-	Target   *typesafe.BoxAnswer     `json:"target,omitempty"`
+	Model    string                `json:"model"`
+	Usage    typesafe.Usage        `json:"usage"`
+	Billing  typesafe.NoulAnswer   `json:"billing"`
+	Category typesafe.ChoiceAnswer `json:"category"`
+	Urgency  typesafe.ScoreAnswer  `json:"urgency"`
+	Target   *typesafe.BoxAnswer   `json:"target,omitzero"`
 }
 
-result, err := typesafe.SystemOneAs[TicketAnalysis](ctx, client, state, questions)
+result, err := client.SystemOneAs[TicketAnalysis](ctx, state, questions)
 if err != nil {
 	log.Fatal(err)
 }
@@ -288,7 +288,7 @@ type MyResult struct {
     Category typesafe.ChoiceAnswer `json:"category"`
     Urgency  typesafe.ScoreAnswer  `json:"urgency"`
 }
-res, err := typesafe.SystemOneAs[MyResult](ctx, client, state, questions)
+res, err := client.SystemOneAs[MyResult](ctx, state, questions)
 ```
 
 #### 7. Error Handling
@@ -384,7 +384,7 @@ go build ./...
 go vet ./...
 go test ./...                        # 运行单元测试
 go test -run TestIntegration ./...   # 运行集成测试（需要设置 TYPESAFE_API_KEY）
-go test -bench . -run XXX ./...      # 运行性能基准测试
+go test -bench=. -run=^$ ./...      # 运行性能基准测试
 ```
 
 ---

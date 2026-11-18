@@ -18,11 +18,10 @@ import (
 
 // TypeSafeError is the marker interface implemented by every error this SDK returns.
 //
-// Match it with [errors.As]:
+// Match it with [errors.AsType] (or [errors.As]):
 //
 //	if err != nil {
-//		var sdkErr typesafe.TypeSafeError
-//		if errors.As(err, &sdkErr) {
+//		if _, ok := errors.AsType[typesafe.TypeSafeError](err); ok {
 //			// the failure came from the SDK
 //		}
 //	}
@@ -57,8 +56,7 @@ func (e *SDKError) isTypeSafeError() {}
 //
 // Typed subclasses such as [RateLimitError] embed APIError and unwrap to it, so a single
 //
-//	var apiErr *typesafe.APIError
-//	errors.As(err, &apiErr)
+//	apiErr, ok := errors.AsType[*typesafe.APIError](err)
 //
 // matches every HTTP failure the SDK returns.
 type APIError struct {
@@ -281,23 +279,17 @@ func (e *APIResponseValidationError) Unwrap() error { return &e.APIError }
 // AsAPIError extracts the [APIError] carried by any HTTP failure this SDK returns.
 // It reports false for connection, timeout, validation-of-input, and configuration errors.
 func AsAPIError(err error) (*APIError, bool) {
-	var apiErr *APIError
-	if errors.As(err, &apiErr) {
-		return apiErr, true
-	}
-	return nil, false
+	return errors.AsType[*APIError](err)
 }
 
 // AsRateLimitError extracts the [RateLimitError] when the failure was an HTTP 429.
 // If the failure was an HTTP 529 [OverloadedError], it produces a compatible [RateLimitError]
 // so rate-limiting and overload backoff logic can treat them interchangeably.
 func AsRateLimitError(err error) (*RateLimitError, bool) {
-	var rateLimit *RateLimitError
-	if errors.As(err, &rateLimit) {
+	if rateLimit, ok := errors.AsType[*RateLimitError](err); ok {
 		return rateLimit, true
 	}
-	var overloaded *OverloadedError
-	if errors.As(err, &overloaded) {
+	if overloaded, ok := errors.AsType[*OverloadedError](err); ok {
 		return &RateLimitError{
 			APIError:     overloaded.APIError,
 			RetryAfterMS: overloaded.RetryAfterMS,
@@ -308,20 +300,12 @@ func AsRateLimitError(err error) (*RateLimitError, bool) {
 
 // AsOverloadedError extracts the [OverloadedError] when the failure was an HTTP 529.
 func AsOverloadedError(err error) (*OverloadedError, bool) {
-	var overloaded *OverloadedError
-	if errors.As(err, &overloaded) {
-		return overloaded, true
-	}
-	return nil, false
+	return errors.AsType[*OverloadedError](err)
 }
 
 // AsTimeoutError extracts the [APITimeoutError] when the request exceeded its timeout.
 func AsTimeoutError(err error) (*APITimeoutError, bool) {
-	var timeout *APITimeoutError
-	if errors.As(err, &timeout) {
-		return timeout, true
-	}
-	return nil, false
+	return errors.AsType[*APITimeoutError](err)
 }
 
 // AsValidationError extracts the [APIResponseValidationError] when a successful response
@@ -371,14 +355,12 @@ func cleanURL(rawURL string) string {
 }
 
 func isAlreadyCleanASCIIURL(rawURL string) bool {
-	var rest string
-	switch {
-	case strings.HasPrefix(rawURL, "https://"):
-		rest = rawURL[len("https://"):]
-	case strings.HasPrefix(rawURL, "http://"):
-		rest = rawURL[len("http://"):]
-	default:
-		return false
+	rest, ok := strings.CutPrefix(rawURL, "https://")
+	if !ok {
+		rest, ok = strings.CutPrefix(rawURL, "http://")
+		if !ok {
+			return false
+		}
 	}
 	if rest == "" || rest[0] == '/' {
 		return false
@@ -492,10 +474,7 @@ func parseRetryAfter(headers http.Header) (time.Duration, bool) {
 		return scaleDuration(seconds, float64(time.Second))
 	}
 	if when, err := http.ParseTime(raw); err == nil {
-		if delay := time.Until(when); delay > 0 {
-			return delay, true
-		}
-		return 0, true
+		return max(time.Until(when), 0), true
 	}
 	return 0, false
 }

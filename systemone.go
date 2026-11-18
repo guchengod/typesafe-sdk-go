@@ -1,6 +1,7 @@
 package typesafe
 
 import (
+	"cmp"
 	"context"
 	"encoding/json/jsontext"
 	jsonv2 "encoding/json/v2"
@@ -9,7 +10,6 @@ import (
 	"maps"
 	"net/http"
 	"slices"
-	"sort"
 	"strings"
 )
 
@@ -73,21 +73,22 @@ func (c *Client) SystemOne(ctx context.Context, state any, questions any, opts .
 //		Tone    typesafe.ChoiceAnswer  `json:"tone"`
 //	}
 //
-//	result, err := typesafe.SystemOneAs[Ticket](ctx, client, state, questions)
+//	result, err := client.SystemOneAs[Ticket](ctx, state, questions)
 //
-// A top-level field that is not a pointer, map, slice, or interface, and that is not tagged
-// `omitempty`, is required: its absence is reported as an [APIResponseValidationError] naming the
-// field rather than silently decoding to a zero value. Answer types this SDK version does not
-// model are dropped from the decoded document, exactly as in the [Client.SystemOne] path.
-func SystemOneAs[T any](ctx context.Context, client *Client, state any, questions any, opts ...RequestOption) (*T, error) {
-	if client == nil || client.config == nil {
+// A top-level field that is not a pointer, map, slice, or interface, and that is tagged neither
+// `omitzero` nor `omitempty`, is required: its absence is reported as an
+// [APIResponseValidationError] naming the field rather than silently decoding to a zero value.
+// Answer types this SDK version does not model are dropped from the decoded document, exactly as in
+// the [Client.SystemOne] path.
+func (c *Client) SystemOneAs[T any](ctx context.Context, state any, questions any, opts ...RequestOption) (*T, error) {
+	if c == nil || c.config == nil {
 		return nil, &SDKError{Message: "Client is not initialized; construct one with NewClient."}
 	}
-	raw, asked, err := client.systemOne(ctx, state, questions, opts)
+	raw, asked, err := c.systemOne(ctx, state, questions, opts)
 	if err != nil {
 		return nil, err
 	}
-	parsed, err := parseSystemOneResponse(raw, asked, client.config.Logger)
+	parsed, err := parseSystemOneResponse(raw, asked, c.config.Logger)
 	if err != nil {
 		return nil, err
 	}
@@ -96,6 +97,14 @@ func SystemOneAs[T any](ctx context.Context, client *Client, state any, question
 		return nil, err
 	}
 	return decodeResponse[T](document, raw)
+}
+
+// SystemOneAs answers questions and decodes the response into T using client.
+//
+// Prefer the generic method [Client.SystemOneAs] in new Go 1.27+ code; this package-level wrapper
+// remains supported for backwards compatibility.
+func SystemOneAs[T any](ctx context.Context, client *Client, state any, questions any, opts ...RequestOption) (*T, error) {
+	return client.SystemOneAs[T](ctx, state, questions, opts...)
 }
 
 // systemOne builds and executes a System One request without decoding the payload. It also returns
@@ -113,15 +122,13 @@ func (c *Client) systemOne(ctx context.Context, state any, questions any, opts [
 
 	body := map[string]any{
 		"state":     state,
-		"model":     cmpOrString(options.model, c.config.DefaultModel),
+		"model":     cmp.Or(options.model, c.config.DefaultModel),
 		"questions": normalized,
 	}
 	// extra_body is a shallow, last-write-wins overlay: a key that collides with state, model, or
 	// questions replaces it, and object values are replaced rather than merged. It is applied before
 	// images are collected so the assets match the body that is actually sent.
-	for key, value := range options.extraBody {
-		body[key] = value
-	}
+	maps.Copy(body, options.extraBody)
 	if _, overridden := options.extraBody["questions"]; overridden {
 		validatedExtraQuestions, err := NormalizeQuestions(body["questions"])
 		if err != nil {
@@ -169,7 +176,7 @@ func sortedQuestionNames(questions map[string]any) []string {
 	for name := range questions {
 		names = append(names, name)
 	}
-	sort.Strings(names)
+	slices.Sort(names)
 	return names
 }
 
@@ -280,16 +287,6 @@ func decodeResponse[T any](document map[string]jsontext.Value, resp *response) (
 func decodeFieldPath(err error) string {
 	if semantic, ok := errors.AsType[*jsonv2.SemanticError](err); ok {
 		return jsonPointerPath(semantic.JSONPointer)
-	}
-	return ""
-}
-
-// cmpOrString returns the first non-empty value.
-func cmpOrString(values ...string) string {
-	for _, value := range values {
-		if value != "" {
-			return value
-		}
 	}
 	return ""
 }

@@ -17,7 +17,7 @@ Ask dozens of questions in a single parallel call and receive calibrated probabi
 - **Automatic Gzip Compression**: Transparently compresses request bodies $\ge 1\text{ KiB}$ with standard gzip.
 - **Multimodal & Object Localization**: First-class support for `Image` assets and `Box` bounding box question primitives.
 - **Resilient Retries**: Exponential backoff with jitter, honoring upstream `Retry-After` response headers.
-- **Strongly Typed**: Typed error taxonomy (`errors.As`), typed responses, and `SystemOneAs[T]` for custom struct decoding.
+- **Strongly Typed**: Typed error taxonomy (`errors.AsType[T]`), typed responses, and `client.SystemOneAs[T]` for custom struct decoding.
 - **Built-in CLI**: `cmd/typesafe` for pipelines, shell scripts, and terminal inspection.
 
 > Requires **Go 1.27.3 or newer**.
@@ -183,19 +183,19 @@ func main() {
 
 ## Custom Response Models (`SystemOneAs`)
 
-Use `SystemOneAs[T]` to decode answers directly into your custom business struct:
+Use `client.SystemOneAs[T]` (or the backwards-compatible `typesafe.SystemOneAs[T]` wrapper) to decode answers directly into your custom business struct:
 
 ```go
 type TicketAnalysis struct {
-	Model    string                  `json:"model"`
-	Usage    typesafe.Usage          `json:"usage"`
-	Billing  typesafe.NoulAnswer     `json:"billing"`
-	Category typesafe.ChoiceAnswer   `json:"category"`
-	Urgency  typesafe.ScoreAnswer    `json:"urgency"`
-	Target   *typesafe.BoxAnswer     `json:"target,omitempty"`
+	Model    string                `json:"model"`
+	Usage    typesafe.Usage        `json:"usage"`
+	Billing  typesafe.NoulAnswer   `json:"billing"`
+	Category typesafe.ChoiceAnswer `json:"category"`
+	Urgency  typesafe.ScoreAnswer  `json:"urgency"`
+	Target   *typesafe.BoxAnswer   `json:"target,omitzero"`
 }
 
-result, err := typesafe.SystemOneAs[TicketAnalysis](ctx, client, state, questions)
+result, err := client.SystemOneAs[TicketAnalysis](ctx, state, questions)
 if err != nil {
 	log.Fatal(err)
 }
@@ -289,7 +289,7 @@ type MyResult struct {
     Category typesafe.ChoiceAnswer `json:"category"`
     Urgency  typesafe.ScoreAnswer  `json:"urgency"`
 }
-res, err := typesafe.SystemOneAs[MyResult](ctx, client, state, questions)
+res, err := client.SystemOneAs[MyResult](ctx, state, questions)
 ```
 
 #### 7. Error Handling
@@ -383,7 +383,7 @@ go build ./...
 go vet ./...
 go test ./...                        # unit tests
 go test -run TestIntegration ./...   # integration tests (requires TYPESAFE_API_KEY)
-go test -bench . -run XXX ./...      # benchmarks
+go test -bench=. -run=^$ ./...      # benchmarks
 ```
 
 ---

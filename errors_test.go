@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"net/http"
 	"reflect"
+	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 	"unicode/utf8"
 )
@@ -51,7 +53,7 @@ func TestErrorStatusMappingToType(t *testing.T) {
 	}
 
 	for _, tc := range cases {
-		t.Run(fmt.Sprint(tc.status), func(t *testing.T) {
+		t.Run(strconv.Itoa(tc.status), func(t *testing.T) {
 			t.Parallel()
 			raw := []byte(`{"message":"failed"}`)
 			err := newAPIError(tc.status, decodeErrorBody(raw), raw,
@@ -444,30 +446,32 @@ func TestParseRetryAfterTruthTable(t *testing.T) {
 
 func TestParseRetryAfterHTTPDate(t *testing.T) {
 	t.Parallel()
-	now := time.Now()
-	future := now.Add(10 * time.Second).UTC().Format(http.TimeFormat)
-	past := now.Add(-10 * time.Second).UTC().Format(http.TimeFormat)
+	synctest.Test(t, func(t *testing.T) {
+		now := time.Now()
+		future := now.Add(10 * time.Second).UTC().Format(http.TimeFormat)
+		past := now.Add(-10 * time.Second).UTC().Format(http.TimeFormat)
 
-	delay, ok := parseRetryAfter(errorsTestHeader(HeaderRetryAfter, future))
-	if !ok {
-		t.Fatalf("parseRetryAfter(future date) ok = false, want true")
-	}
-	if delay < 8*time.Second || delay > 11*time.Second {
-		t.Errorf("parseRetryAfter(future date) = %v, want roughly 10s", delay)
-	}
+		delay, ok := parseRetryAfter(errorsTestHeader(HeaderRetryAfter, future))
+		if !ok {
+			t.Fatalf("parseRetryAfter(future date) ok = false, want true")
+		}
+		if delay != 10*time.Second {
+			t.Errorf("parseRetryAfter(future date) = %v, want 10s", delay)
+		}
 
-	pastDelay, ok := parseRetryAfter(errorsTestHeader(HeaderRetryAfter, past))
-	if !ok {
-		t.Fatalf("parseRetryAfter(past date) ok = false, want true")
-	}
-	if pastDelay != 0 {
-		t.Errorf("parseRetryAfter(past date) = %v, want 0", pastDelay)
-	}
+		pastDelay, ok := parseRetryAfter(errorsTestHeader(HeaderRetryAfter, past))
+		if !ok {
+			t.Fatalf("parseRetryAfter(past date) ok = false, want true")
+		}
+		if pastDelay != 0 {
+			t.Errorf("parseRetryAfter(past date) = %v, want 0", pastDelay)
+		}
 
-	fallback, ok := parseRetryAfter(errorsTestHeader(HeaderRetryAfterMs, "bad", HeaderRetryAfter, future))
-	if !ok || fallback < 8*time.Second || fallback > 11*time.Second {
-		t.Errorf("parseRetryAfter(malformed ms, future date) = (%v, %v), want roughly 10s", fallback, ok)
-	}
+		fallback, ok := parseRetryAfter(errorsTestHeader(HeaderRetryAfterMs, "bad", HeaderRetryAfter, future))
+		if !ok || fallback != 10*time.Second {
+			t.Errorf("parseRetryAfter(malformed ms, future date) = (%v, %v), want (10s, true)", fallback, ok)
+		}
+	})
 }
 
 func TestRateLimitErrorRetryAfterMetadata(t *testing.T) {
@@ -525,19 +529,21 @@ func TestRateLimitErrorRetryAfterMetadata(t *testing.T) {
 
 func TestRateLimitErrorRetryAfterFromHTTPDate(t *testing.T) {
 	t.Parallel()
-	future := time.Now().Add(30 * time.Second).UTC().Format(http.TimeFormat)
-	client, _ := newMockClient(t, func(*http.Request, int) *http.Response {
-		return JSONResponseWithHeaders(http.StatusTooManyRequests, `{}`, map[string]string{HeaderRetryAfter: future})
+	synctest.Test(t, func(t *testing.T) {
+		future := time.Now().Add(30 * time.Second).UTC().Format(http.TimeFormat)
+		client, _ := newMockClient(t, func(*http.Request, int) *http.Response {
+			return JSONResponseWithHeaders(http.StatusTooManyRequests, `{}`, map[string]string{HeaderRetryAfter: future})
+		})
+		_, err := client.Models.List(t.Context())
+		rateLimit, ok := AsRateLimitError(err)
+		if !ok {
+			t.Fatalf("AsRateLimitError(%v) = false, want true", err)
+		}
+		delay, hasDelay := rateLimit.RetryAfter()
+		if !hasDelay || delay != 30*time.Second {
+			t.Errorf("RetryAfter() = (%v, %v), want (30s, true)", delay, hasDelay)
+		}
 	})
-	_, err := client.Models.List(t.Context())
-	rateLimit, ok := AsRateLimitError(err)
-	if !ok {
-		t.Fatalf("AsRateLimitError(%v) = false, want true", err)
-	}
-	delay, hasDelay := rateLimit.RetryAfter()
-	if !hasDelay || delay < 25*time.Second || delay > 31*time.Second {
-		t.Errorf("RetryAfter() = (%v, %v), want roughly 30s", delay, hasDelay)
-	}
 }
 
 func TestErrorTraversalToAPIError(t *testing.T) {
@@ -578,13 +584,11 @@ func TestErrorTraversalToAPIError(t *testing.T) {
 				t.Errorf("RequestID = %q, want %q", apiErr.RequestID, base.RequestID)
 			}
 
-			var extracted *APIError
-			if !errors.As(tc.err, &extracted) {
+			if _, ok := errors.AsType[*APIError](tc.err); !ok {
 				t.Errorf("errors.As(%v, *APIError) = false, want true", tc.err)
 			}
 
-			var sdkErr TypeSafeError
-			if !errors.As(tc.err, &sdkErr) {
+			if _, ok := errors.AsType[TypeSafeError](tc.err); !ok {
 				t.Errorf("errors.As(%v, TypeSafeError) = false, want true", tc.err)
 			}
 		})
@@ -597,9 +601,9 @@ func TestErrorExtractorsReportNoMatch(t *testing.T) {
 	connectionErr := &APIConnectionError{Message: "Connection error"}
 	timeoutErr := &APITimeoutError{Timeout: 2 * time.Second}
 	plain := errors.New("plain failure")
-	validationErr := &APIResponseValidationError{APIError: APIError{Status: 200}, FieldPath: "answers.q"}
-	rateLimitErr := &RateLimitError{APIError: APIError{Status: 429}}
-	internalErr := &InternalServerError{APIError: APIError{Status: 500}}
+	validationErr := &APIResponseValidationError{Status: 200, FieldPath: "answers.q"}
+	rateLimitErr := &RateLimitError{Status: 429}
+	internalErr := &InternalServerError{Status: 500}
 
 	apiErrorFalse := []error{sdkErr, connectionErr, timeoutErr, plain, fmt.Errorf("call failed: %w", sdkErr)}
 	for _, err := range apiErrorFalse {
@@ -653,9 +657,9 @@ func TestTypeSafeErrorInterfaceMatch(t *testing.T) {
 		{"APIConnectionError", &APIConnectionError{Message: "Connection error"}, true},
 		{"APITimeoutError", &APITimeoutError{Timeout: time.Second}, true},
 		{"APIError", &APIError{Status: 500}, true},
-		{"BadRequestError", &BadRequestError{APIError: APIError{Status: 400}}, true},
-		{"RateLimitError", &RateLimitError{APIError: APIError{Status: 429}}, true},
-		{"APIResponseValidationError", &APIResponseValidationError{APIError: APIError{Status: 200}}, true},
+		{"BadRequestError", &BadRequestError{Status: 400}, true},
+		{"RateLimitError", &RateLimitError{Status: 429}, true},
+		{"APIResponseValidationError", &APIResponseValidationError{Status: 200}, true},
 		{"wrapped SDK error", fmt.Errorf("wrapped: %w", &SDKError{Message: "boom"}), true},
 		{"plain error", errors.New("plain"), false},
 	}
@@ -663,9 +667,8 @@ func TestTypeSafeErrorInterfaceMatch(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Parallel()
-			var target TypeSafeError
-			if got := errors.As(tc.err, &target); got != tc.match {
-				t.Errorf("errors.As(%v, TypeSafeError) = %v, want %v", tc.err, got, tc.match)
+			if _, got := errors.AsType[TypeSafeError](tc.err); got != tc.match {
+				t.Errorf("errors.AsType[TypeSafeError](%v) = %v, want %v", tc.err, got, tc.match)
 			}
 		})
 	}
@@ -758,7 +761,7 @@ func TestAPITimeoutErrorMessageText(t *testing.T) {
 			if got := err.Error(); got != tc.want {
 				t.Errorf("Error() = %q, want %q", got, tc.want)
 			}
-			if !errors.As(err, new(TypeSafeError)) {
+			if _, ok := errors.AsType[TypeSafeError](err); !ok {
 				t.Errorf("timeout error does not match TypeSafeError")
 			}
 		})
@@ -768,8 +771,8 @@ func TestAPITimeoutErrorMessageText(t *testing.T) {
 		t.Parallel()
 		cause := errors.New("i/o timeout")
 		err := &APITimeoutError{
-			APIConnectionError: APIConnectionError{Cause: cause},
-			Timeout:            5 * time.Second,
+			Cause:   cause,
+			Timeout: 5 * time.Second,
 		}
 		if got, want := err.Error(), "Request timed out (timeout=5s)."; got != want {
 			t.Errorf("Error() = %q, want %q", got, want)
@@ -788,7 +791,7 @@ func TestAPIResponseValidationErrorMessage(t *testing.T) {
 	t.Run("without request context", func(t *testing.T) {
 		t.Parallel()
 		err := &APIResponseValidationError{
-			APIError:  APIError{Status: 200},
+			Status:    200,
 			FieldPath: "answers.tone.confidence",
 		}
 		const want = "200 Invalid response data at 'answers.tone.confidence'."
@@ -800,11 +803,9 @@ func TestAPIResponseValidationErrorMessage(t *testing.T) {
 	t.Run("with request context", func(t *testing.T) {
 		t.Parallel()
 		err := &APIResponseValidationError{
-			APIError: APIError{
-				Status:    200,
-				Endpoint:  "POST https://api.typesafe.ai/v1/systemone",
-				RequestID: "req-v",
-			},
+			Status:    200,
+			Endpoint:  "POST https://api.typesafe.ai/v1/systemone",
+			RequestID: "req-v",
 			FieldPath: "answers.q.noul",
 		}
 		const want = "POST https://api.typesafe.ai/v1/systemone: 200 Invalid response data at 'answers.q.noul'. (request_id=req-v)"

@@ -2,7 +2,6 @@ package typesafe
 
 import (
 	"bytes"
-	"crypto/rand"
 	"encoding/base64"
 	jsonv2 "encoding/json/v2"
 	"fmt"
@@ -11,6 +10,7 @@ import (
 	"path/filepath"
 	"reflect"
 	"strings"
+	"uuid"
 )
 
 // Asset describes an asset attached to a System One request.
@@ -275,18 +275,15 @@ func normalizeImageFormat(format string) (string, error) {
 }
 
 func newRandomRef(prefix string) string {
-	b := make([]byte, 16)
-	if _, err := rand.Read(b); err != nil {
-		panic("typesafe: crypto/rand failed: " + err.Error())
-	}
-	return fmt.Sprintf("%s-%08x-%04x-%04x-%04x-%012x", prefix, b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
+	buf := make([]byte, 0, len(prefix)+1+36)
+	buf = append(buf, prefix...)
+	buf = append(buf, '-')
+	buf, _ = uuid.NewV4().AppendText(buf)
+	return string(buf)
 }
 
 // imagePointerType is the type the walker recognizes as an image reference.
-var (
-	imagePointerType         = reflect.TypeFor[*Image]()
-	questionExtraCarrierType = reflect.TypeFor[questionExtraCarrier]()
-)
+var imagePointerType = reflect.TypeFor[*Image]()
 
 const maxFastImageWalkDepth = 8
 
@@ -494,7 +491,7 @@ func walkImages(value reflect.Value, assets *map[string]any, seen *map[imageVisi
 	}
 	if value.Type() == imagePointerType {
 		if value.CanInterface() {
-			if image, ok := value.Interface().(*Image); ok {
+			if image, ok := reflect.TypeAssert[*Image](value); ok {
 				return registerImageAsset(image, assets)
 			}
 		}
@@ -538,8 +535,8 @@ func walkImages(value reflect.Value, assets *map[string]any, seen *map[imageVisi
 		}
 	case reflect.Struct:
 		typ := value.Type()
-		if typ.Implements(questionExtraCarrierType) && value.CanInterface() {
-			if carrier, ok := value.Interface().(questionExtraCarrier); ok {
+		if value.CanInterface() {
+			if carrier, ok := reflect.TypeAssert[questionExtraCarrier](value); ok {
 				if extra := carrier.questionExtra(); len(extra) > 0 {
 					if err := walkImages(reflect.ValueOf(extra), assets, seen); err != nil {
 						return err

@@ -33,26 +33,15 @@ func ParseLogLevel(level string) (slog.Level, bool) {
 // offLevel is above every level slog records, so a logger set to it emits nothing.
 const offLevel = slog.Level(100)
 
-// discardHandler records nothing and reports every level as disabled.
-//
-// Reporting the level as disabled matters for more than tidiness: the SDK guards its logging with
-// Enabled before building attributes, so a logger that claims to be enabled would make every
-// request pay for records that are then thrown away.
-type discardHandler struct{}
-
-func (discardHandler) Enabled(context.Context, slog.Level) bool  { return false }
-func (discardHandler) Handle(context.Context, slog.Record) error { return nil }
-func (d discardHandler) WithAttrs([]slog.Attr) slog.Handler      { return d }
-func (d discardHandler) WithGroup(string) slog.Handler           { return d }
-
 // defaultLogger returns the logger used when neither [WithLogger] nor TYPESAFE_LOG_LEVEL is set.
 //
-// The SDK never logs by default: without configuration it discards records, which is what library
-// code should do in Go. Setting TYPESAFE_LOG_LEVEL to a level name sends records to stderr.
+// The SDK never logs by default: without configuration it routes to [slog.DiscardHandler], which
+// reports every level as disabled so requests never pay to build discarded attributes. Setting
+// TYPESAFE_LOG_LEVEL to a level name sends records to stderr.
 func defaultLogger() *slog.Logger {
 	level, ok := ParseLogLevel(os.Getenv(LogLevelEnv))
 	if !ok || level >= offLevel {
-		return slog.New(discardHandler{})
+		return slog.New(slog.DiscardHandler)
 	}
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 }
@@ -105,12 +94,9 @@ func isSecretHeader(name string) bool {
 		return true
 	}
 	normalized := stripKeySeparators(lowered)
-	for _, marker := range secretKeyMarkers {
-		if strings.Contains(normalized, marker) {
-			return true
-		}
-	}
-	return false
+	return slices.ContainsFunc(secretKeyMarkers, func(marker string) bool {
+		return strings.Contains(normalized, marker)
+	})
 }
 
 func trimShortASCII(s string) (string, bool) {
@@ -212,7 +198,7 @@ type RedactingHandler struct {
 // NewRedactingHandler wraps handler so that credential-bearing attributes are redacted.
 func NewRedactingHandler(handler slog.Handler) *RedactingHandler {
 	if handler == nil {
-		handler = discardHandler{}
+		handler = slog.DiscardHandler
 	}
 	return &RedactingHandler{handler: handler}
 }

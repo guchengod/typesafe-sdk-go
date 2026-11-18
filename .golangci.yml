@@ -27,6 +27,12 @@ linters:
     - noctx
     - containedctx
     - nolintlint
+    - modernize
+    - usetesting
+    - intrange
+    - usestdlibvars
+    - perfsprint
+    - unconvert
 
   settings:
     errcheck:
@@ -34,3 +40,7 @@ linters:
     nolintlint:
       require-explanation: true
       require-specific: true
+
+formatters:
+  enable:
+    - gofmt

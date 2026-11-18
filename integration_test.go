@@ -10,6 +10,7 @@ import (
 	"image/png"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -143,7 +144,7 @@ func TestIntegrationSystemOne(t *testing.T) {
 	if !ok {
 		t.Fatal("no choice answer named tone")
 	}
-	if !contains([]string{"calm", "frustrated", "angry"}, tone.Choice) {
+	if !slices.Contains([]string{"calm", "frustrated", "angry"}, tone.Choice) {
 		t.Errorf("tone.Choice = %q, want one of calm/frustrated/angry", tone.Choice)
 	}
 	if total := sumValues(tone.Probabilities); total < 0.9 || total > 1.1 {
@@ -212,9 +213,9 @@ func TestIntegrationSystemOneAs(t *testing.T) {
 		),
 	}
 
-	answers, err := SystemOneAs[ticketAnswers](t.Context(), client, state, questions)
+	answers, err := client.SystemOneAs[ticketAnswers](t.Context(), state, questions)
 	if err != nil {
-		t.Fatalf("SystemOneAs() error = %v", err)
+		t.Fatalf("client.SystemOneAs() error = %v", err)
 	}
 	if answers.Model == "" {
 		t.Error("Model is empty")
@@ -222,7 +223,7 @@ func TestIntegrationSystemOneAs(t *testing.T) {
 	if answers.Billing.Type != "noul" || answers.Billing.Noul < 0 || answers.Billing.Noul > 1 {
 		t.Errorf("Billing = %+v, want a noul answer within [0,1]", answers.Billing)
 	}
-	if !contains([]string{"calm", "frustrated", "angry"}, answers.Tone.Choice) {
+	if !slices.Contains([]string{"calm", "frustrated", "angry"}, answers.Tone.Choice) {
 		t.Errorf("Tone = %+v, want a modeled choice", answers.Tone)
 	}
 	if answers.Urgency.Score < 0 || answers.Urgency.Score > 2 {
@@ -255,8 +256,8 @@ func TestIntegrationUnauthorizedKey(t *testing.T) {
 	if err == nil {
 		t.Fatal("Models.List() with an invalid key succeeded")
 	}
-	var authErr *AuthenticationError
-	if !errors.As(err, &authErr) {
+	authErr, ok := errors.AsType[*AuthenticationError](err)
+	if !ok {
 		t.Fatalf("Models.List() error = %v (%T), want *AuthenticationError", err, err)
 	}
 	if authErr.Status != 401 {
@@ -457,8 +458,8 @@ func TestIntegrationInvalidModel(t *testing.T) {
 
 func createTestPNG(w, h int) []byte {
 	img := image.NewRGBA(image.Rect(0, 0, w, h))
-	for y := 0; y < h; y++ {
-		for x := 0; x < w; x++ {
+	for y := range h {
+		for x := range w {
 			img.Set(x, y, color.White)
 		}
 	}
@@ -470,15 +471,6 @@ func createTestPNG(w, h int) []byte {
 	var buf bytes.Buffer
 	_ = png.Encode(&buf, img)
 	return buf.Bytes()
-}
-
-func contains(values []string, target string) bool {
-	for _, value := range values {
-		if value == target {
-			return true
-		}
-	}
-	return false
 }
 
 func sumValues[K comparable](values map[K]float64) float64 {

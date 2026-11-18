@@ -21,8 +21,8 @@ import (
 // typesafe.SystemOneResponse; the answer fields are named after the questions and are lifted out
 // of "answers" onto the document by SystemOneAs.
 type TicketClassification struct {
-	// Model and Usage are required: they are neither pointers nor tagged omitempty, so the SDK
-	// reports an APIResponseValidationError naming the field when the response omits them.
+	// Model and Usage are required: they are neither pointers nor tagged omitzero/omitempty, so the
+	// SDK reports an APIResponseValidationError naming the field when the response omits them.
 	Model string         `json:"model"`
 	Usage typesafe.Usage `json:"usage"`
 
@@ -34,7 +34,7 @@ type TicketClassification struct {
 	Billing *typesafe.NoulAnswer `json:"billing"`
 
 	// Summary is optional because the tag marks it so.
-	Summary string `json:"summary,omitempty"`
+	Summary string `json:"summary,omitzero"`
 }
 
 func main() {
@@ -132,9 +132,8 @@ Set it to your TypeSafe API key and run the example again:
 	// shallow-merged over the body last, so a key that collides with "state", "model", or
 	// "questions" replaces the SDK's value. Here it overrides the model WithModel set, which is
 	// why the request asks for jev-latest even though WithModel named jev-preview.
-	ticket, err := typesafe.SystemOneAs[TicketClassification](
+	ticket, err := client.SystemOneAs[TicketClassification](
 		ctx,
-		client,
 		state,
 		questions,
 		typesafe.WithModel("jev-preview"),
@@ -218,32 +217,33 @@ Set it to your TypeSafe API key and run the example again:
 // reportError prints the most specific description the SDK exposes for err. Every typed failure
 // unwraps to the errors its more general siblings cover, so the checks run most specific first.
 func reportError(err error) {
-	var rateLimit *typesafe.RateLimitError
-	var overloaded *typesafe.OverloadedError
-	var validation *typesafe.APIResponseValidationError
-	var apiErr *typesafe.APIError
-	var timeout *typesafe.APITimeoutError
-
-	switch {
-	case errors.As(err, &overloaded):
+	if overloaded, ok := errors.AsType[*typesafe.OverloadedError](err); ok {
 		if wait, ok := overloaded.RetryAfter(); ok {
 			fmt.Printf("  temporarily overloaded (529): retry after %v (request_id=%s)\n", wait, overloaded.RequestID)
 		} else {
 			fmt.Printf("  temporarily overloaded (529): retry after a short delay (request_id=%s)\n", overloaded.RequestID)
 		}
-	case errors.As(err, &rateLimit):
+		return
+	}
+	if rateLimit, ok := errors.AsType[*typesafe.RateLimitError](err); ok {
 		if wait, ok := rateLimit.RetryAfter(); ok {
 			fmt.Printf("  rate limited: retry after %v (request_id=%s)\n", wait, rateLimit.RequestID)
 		} else {
 			fmt.Printf("  rate limited: no Retry-After header (request_id=%s)\n", rateLimit.RequestID)
 		}
-	case errors.As(err, &validation):
-		fmt.Printf("  invalid response field %q: %v\n", validation.FieldPath, validation)
-	case errors.As(err, &apiErr):
-		fmt.Printf("  http %d: %v\n", apiErr.Status, apiErr)
-	case errors.As(err, &timeout):
-		fmt.Printf("  timed out after %v\n", timeout.Timeout)
-	default:
-		fmt.Printf("  %v\n", err)
+		return
 	}
+	if validation, ok := errors.AsType[*typesafe.APIResponseValidationError](err); ok {
+		fmt.Printf("  invalid response field %q: %v\n", validation.FieldPath, validation)
+		return
+	}
+	if apiErr, ok := errors.AsType[*typesafe.APIError](err); ok {
+		fmt.Printf("  http %d: %v\n", apiErr.Status, apiErr)
+		return
+	}
+	if timeout, ok := errors.AsType[*typesafe.APITimeoutError](err); ok {
+		fmt.Printf("  timed out after %v\n", timeout.Timeout)
+		return
+	}
+	fmt.Printf("  %v\n", err)
 }

@@ -67,8 +67,8 @@ func TestConfigAPIKeyResolution(t *testing.T) {
 		t.Setenv(APIKeyEnv, "")
 		err := configTestConstructionError(t)
 
-		var sdkErr *SDKError
-		if !errors.As(err, &sdkErr) {
+		sdkErr, ok := errors.AsType[*SDKError](err)
+		if !ok {
 			t.Fatalf("error = %v (%T), want *SDKError", err, err)
 		}
 		for _, want := range []string{"WithAPIKey", APIKeyEnv} {
@@ -213,8 +213,8 @@ func TestConfigTimeoutPrecedence(t *testing.T) {
 		for _, timeout := range []time.Duration{0, -time.Millisecond, -time.Second} {
 			err := configTestConstructionError(t, WithAPIKey("k"), WithTimeout(timeout))
 
-			var sdkErr *SDKError
-			if !errors.As(err, &sdkErr) {
+			sdkErr, ok := errors.AsType[*SDKError](err)
+			if !ok {
 				t.Fatalf("WithTimeout(%v) error = %v (%T), want *SDKError", timeout, err, err)
 			}
 			if !strings.Contains(sdkErr.Message, "timeout must be a positive") {
@@ -230,8 +230,8 @@ func TestConfigTransportAndHTTPClientAreMutuallyExclusive(t *testing.T) {
 
 	err := configTestConstructionError(t, WithAPIKey("k"), WithTransport(transport), WithHTTPClient(httpClient))
 
-	var sdkErr *SDKError
-	if !errors.As(err, &sdkErr) {
+	sdkErr, ok := errors.AsType[*SDKError](err)
+	if !ok {
 		t.Fatalf("error = %v (%T), want *SDKError", err, err)
 	}
 	if !strings.Contains(sdkErr.Message, "transport and http_client are mutually exclusive") {

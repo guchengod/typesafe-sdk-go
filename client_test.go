@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -377,8 +378,7 @@ func TestClientCallRetryOverridesClientPolicy(t *testing.T) {
 		if attempts != 3 {
 			t.Errorf("attempts = %d, want 3", attempts)
 		}
-		var apiErr *APIError
-		if !errors.As(err, &apiErr) || apiErr.Status != http.StatusInternalServerError {
+		if apiErr, ok := errors.AsType[*APIError](err); !ok || apiErr.Status != http.StatusInternalServerError {
 			t.Errorf("error = %v (%T), want a 500 *APIError", err, err)
 		}
 	})
@@ -403,29 +403,33 @@ func TestClientCallRetryOverridesClientPolicy(t *testing.T) {
 
 func TestClientCallTimeoutOverride(t *testing.T) {
 	t.Run("per-call timeout produces a timeout error", func(t *testing.T) {
-		client := clientTestNewClient(t, WithTransport(clientTestDeadlineTransport{}), WithTimeout(30*time.Second))
+		synctest.Test(t, func(t *testing.T) {
+			client := clientTestNewClient(t, WithTransport(clientTestDeadlineTransport{}), WithTimeout(30*time.Second))
 
-		_, err := client.Models.List(t.Context(), WithCallTimeout(5*time.Millisecond))
-		timeoutErr, ok := AsTimeoutError(err)
-		if !ok {
-			t.Fatalf("Models.List() error = %v (%T), want *APITimeoutError", err, err)
-		}
-		if timeoutErr.Timeout != 5*time.Millisecond {
-			t.Errorf("Timeout = %v, want the per-call %v", timeoutErr.Timeout, 5*time.Millisecond)
-		}
+			_, err := client.Models.List(t.Context(), WithCallTimeout(5*time.Second))
+			timeoutErr, ok := AsTimeoutError(err)
+			if !ok {
+				t.Fatalf("Models.List() error = %v (%T), want *APITimeoutError", err, err)
+			}
+			if timeoutErr.Timeout != 5*time.Second {
+				t.Errorf("Timeout = %v, want the per-call %v", timeoutErr.Timeout, 5*time.Second)
+			}
+		})
 	})
 
 	t.Run("client timeout applies without an override", func(t *testing.T) {
-		client := clientTestNewClient(t, WithTransport(clientTestDeadlineTransport{}), WithTimeout(5*time.Millisecond))
+		synctest.Test(t, func(t *testing.T) {
+			client := clientTestNewClient(t, WithTransport(clientTestDeadlineTransport{}), WithTimeout(5*time.Second))
 
-		_, err := client.Models.List(t.Context())
-		timeoutErr, ok := AsTimeoutError(err)
-		if !ok {
-			t.Fatalf("Models.List() error = %v (%T), want *APITimeoutError", err, err)
-		}
-		if timeoutErr.Timeout != 5*time.Millisecond {
-			t.Errorf("Timeout = %v, want the client-level %v", timeoutErr.Timeout, 5*time.Millisecond)
-		}
+			_, err := client.Models.List(t.Context())
+			timeoutErr, ok := AsTimeoutError(err)
+			if !ok {
+				t.Fatalf("Models.List() error = %v (%T), want *APITimeoutError", err, err)
+			}
+			if timeoutErr.Timeout != 5*time.Second {
+				t.Errorf("Timeout = %v, want the client-level %v", timeoutErr.Timeout, 5*time.Second)
+			}
+		})
 	})
 }
 
@@ -436,8 +440,8 @@ func TestClientNonPositiveCallTimeoutIsRejectedBeforeSending(t *testing.T) {
 	for _, timeout := range []time.Duration{0, -time.Second} {
 		_, err := client.Models.List(t.Context(), WithCallTimeout(timeout))
 
-		var sdkErr *SDKError
-		if !errors.As(err, &sdkErr) {
+		sdkErr, ok := errors.AsType[*SDKError](err)
+		if !ok {
 			t.Fatalf("WithCallTimeout(%v) error = %v (%T), want *SDKError", timeout, err, err)
 		}
 		if !strings.Contains(sdkErr.Message, "timeout must be a positive") {

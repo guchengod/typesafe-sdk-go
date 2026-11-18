@@ -6,8 +6,10 @@ import (
 	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -122,7 +124,7 @@ func TestSystemOneResponseHappyPath(t *testing.T) {
 	if tone.AnswerType() != "choice" || tone.Choice != "angry" || tone.Confidence != 0.9 {
 		t.Errorf("tone = %+v, want choice angry at 0.9", tone)
 	}
-	if !reflect.DeepEqual(tone.Probabilities, map[string]float64{"calm": 0.1, "angry": 0.9}) {
+	if !maps.Equal(tone.Probabilities, map[string]float64{"calm": 0.1, "angry": 0.9}) {
 		t.Errorf("tone.Probabilities = %#v", tone.Probabilities)
 	}
 
@@ -136,7 +138,7 @@ func TestSystemOneResponseHappyPath(t *testing.T) {
 	if !reflect.DeepEqual(urgency.Legend, map[string]any{"0": "can wait", "1": "this week", "2": "today"}) {
 		t.Errorf("urgency.Legend = %#v", urgency.Legend)
 	}
-	if !reflect.DeepEqual(urgency.Probabilities, map[int]float64{0: 0.1, 1: 0.1, 2: 0.8}) {
+	if !maps.Equal(urgency.Probabilities, map[int]float64{0: 0.1, 1: 0.1, 2: 0.8}) {
 		t.Errorf("urgency.Probabilities = %#v", urgency.Probabilities)
 	}
 
@@ -420,7 +422,7 @@ func TestScoreAnswerLegendKeepsTheAPIsKeys(t *testing.T) {
 	if legend, present := urgency.LegendFor(1); !present || legend != "today" {
 		t.Errorf("LegendFor(1) = %#v, %v, want %q, true", legend, present, "today")
 	}
-	if !reflect.DeepEqual(urgency.Probabilities, map[int]float64{0: 0.5, 1: 0.5}) {
+	if !maps.Equal(urgency.Probabilities, map[int]float64{0: 0.5, 1: 0.5}) {
 		t.Errorf("Probabilities = %#v, want %#v", urgency.Probabilities, map[int]float64{0: 0.5, 1: 0.5})
 	}
 }
@@ -592,7 +594,7 @@ func TestSystemOneResponsePreservesNestedLegendJSON(t *testing.T) {
 	if !reflect.DeepEqual(answer.Legend, want) {
 		t.Errorf("Legend = %#v, want %#v", answer.Legend, want)
 	}
-	if !reflect.DeepEqual(answer.Probabilities, map[int]float64{0: 1.0}) {
+	if !maps.Equal(answer.Probabilities, map[int]float64{0: 1.0}) {
 		t.Errorf("Probabilities = %#v, want %#v", answer.Probabilities, map[int]float64{0: 1.0})
 	}
 
@@ -808,7 +810,7 @@ func TestListModelsResponseHappyPath(t *testing.T) {
 		{Name: "jev-latest", Description: "Fast model", ReleaseDate: "2026-08-01"},
 		{Name: "jev-mini", Description: "Small model", ReleaseDate: "2026-07-15"},
 	}
-	if !reflect.DeepEqual(response.Models, want) {
+	if !slices.Equal(response.Models, want) {
 		t.Errorf("Models = %+v, want %+v", response.Models, want)
 	}
 
@@ -910,7 +912,7 @@ func TestListModelsResponseMarshalJSONEncodesOnlyThePayload(t *testing.T) {
 	if err := jsonv2.Unmarshal(encoded, &restored); err != nil {
 		t.Fatalf("jsonv2.Unmarshal(ListModelsResponse) error = %v", err)
 	}
-	if !reflect.DeepEqual(restored.Models, response.Models) {
+	if !slices.Equal(restored.Models, response.Models) {
 		t.Errorf("round-tripped models = %+v, want %+v", restored.Models, response.Models)
 	}
 	reencoded, err := jsonv2.Marshal(&restored, marshalOptions)
@@ -959,13 +961,14 @@ type responseTestAnswersOnly struct {
 
 // responseTestOptionals declares every shape that may be absent from the document.
 type responseTestOptionals struct {
-	Model string         `json:"model"`
-	Usage Usage          `json:"usage"`
-	Maybe *NoulAnswer    `json:"maybe"`
-	Items []string       `json:"items"`
-	Meta  map[string]any `json:"meta"`
-	Extra any            `json:"extra"`
-	Spare string         `json:"spare,omitempty"`
+	Model     string         `json:"model"`
+	Usage     Usage          `json:"usage"`
+	Maybe     *NoulAnswer    `json:"maybe"`
+	Items     []string       `json:"items"`
+	Meta      map[string]any `json:"meta"`
+	Extra     any            `json:"extra"`
+	Spare     string         `json:"spare,omitempty"`
+	SpareZero int            `json:"spare_zero,omitzero"`
 }
 
 // responseTestRequired declares a required field whose absence must be reported, alongside fields
@@ -1019,7 +1022,7 @@ func TestSystemOneAsLiftsAnswersOntoCustomStruct(t *testing.T) {
 	if result.Tone.Type != "choice" || result.Tone.Choice != "angry" || result.Tone.Confidence != 0.9 {
 		t.Errorf("Tone = %+v, want choice angry at 0.9", result.Tone)
 	}
-	if !reflect.DeepEqual(result.Tone.Probabilities, map[string]float64{"calm": 0.1, "angry": 0.9}) {
+	if !maps.Equal(result.Tone.Probabilities, map[string]float64{"calm": 0.1, "angry": 0.9}) {
 		t.Errorf("Tone.Probabilities = %#v", result.Tone.Probabilities)
 	}
 	if result.Urgency.Type != "score" || result.Urgency.Score != 1.7 || result.Urgency.Confidence != 0.8 {
@@ -1030,6 +1033,33 @@ func TestSystemOneAsLiftsAnswersOntoCustomStruct(t *testing.T) {
 	}
 	if result.Urgency.Probabilities[2] != 0.8 {
 		t.Errorf("Urgency.Probabilities[2] = %v, want 0.8", result.Urgency.Probabilities[2])
+	}
+}
+
+func TestClientSystemOneAsGenericMethod(t *testing.T) {
+	t.Parallel()
+
+	client := responseTestJSONClient(t, fixedAnswerResponse, "req-method-as")
+	result, err := client.SystemOneAs[responseTestEnvelope](t.Context(), "state", fixedQuestions())
+	if err != nil {
+		t.Fatalf("client.SystemOneAs() error = %v", err)
+	}
+	if result.Model != "jev-latest" || result.Billing.Noul != 0.98 || result.Tone.Choice != "angry" {
+		t.Errorf("client.SystemOneAs() = %+v", result)
+	}
+
+	var nilClient *Client
+	if _, err := nilClient.SystemOneAs[responseTestEnvelope](t.Context(), "state", fixedQuestions()); err == nil {
+		t.Fatal("nilClient.SystemOneAs() error = nil, want *SDKError")
+	} else if _, ok := errors.AsType[*SDKError](err); !ok {
+		t.Errorf("nilClient.SystemOneAs() error = %T (%v), want *SDKError", err, err)
+	}
+
+	var zeroClient Client
+	if _, err := zeroClient.SystemOneAs[responseTestEnvelope](t.Context(), "state", fixedQuestions()); err == nil {
+		t.Fatal("zeroClient.SystemOneAs() error = nil, want *SDKError")
+	} else if _, ok := errors.AsType[*SDKError](err); !ok {
+		t.Errorf("zeroClient.SystemOneAs() error = %T (%v), want *SDKError", err, err)
 	}
 }
 
@@ -1069,6 +1099,9 @@ func TestSystemOneAsOptionalFieldsMayBeAbsent(t *testing.T) {
 	}
 	if result.Spare != "" {
 		t.Errorf("Spare = %q, want the empty string", result.Spare)
+	}
+	if result.SpareZero != 0 {
+		t.Errorf("SpareZero = %d, want 0", result.SpareZero)
 	}
 }
 

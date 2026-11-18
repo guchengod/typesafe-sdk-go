@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"sync"
@@ -76,7 +77,7 @@ func (m *mockTransport) Close() error {
 func (m *mockTransport) callsSnapshot() []recordedCall {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return append([]recordedCall(nil), m.calls...)
+	return slices.Clone(m.calls)
 }
 
 // lastCall returns the most recent recorded call.

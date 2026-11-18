@@ -2,6 +2,7 @@ package typesafe
 
 import (
 	"bytes"
+	"cmp"
 	"compress/gzip"
 	"context"
 	"crypto/tls"
@@ -89,10 +90,7 @@ type response struct {
 // A non-2xx status is returned as a typed [APIError] so the retry policy can classify it. Read
 // failures and timeouts are returned as [APIConnectionError] or [APITimeoutError].
 func execute(ctx context.Context, config *Config, httpClient *http.Client, req request) (*response, error) {
-	policy := config.RetryPolicy
-	if req.retryPolicy != nil {
-		policy = req.retryPolicy
-	}
+	policy := cmp.Or(req.retryPolicy, config.RetryPolicy)
 
 	targetURL := config.BaseURL + req.path
 	safeURL := cleanURL(targetURL)
@@ -323,9 +321,7 @@ func readResponseBody(httpResp *http.Response) ([]byte, error) {
 		if err != nil {
 			return nil, err
 		}
-		if len(payload) > MaxErrorResponseBodyLimit {
-			payload = payload[:MaxErrorResponseBodyLimit]
-		}
+		payload = payload[:min(len(payload), MaxErrorResponseBodyLimit)]
 		return payload, nil
 	}
 	if httpResp.ContentLength > MaxResponseBodyLimit {
@@ -336,8 +332,7 @@ func readResponseBody(httpResp *http.Response) ([]byte, error) {
 
 // classifyTransportError maps a transport failure onto the SDK's timeout and connection errors.
 func classifyTransportError(err error, timeout time.Duration) error {
-	var timeoutErr *APITimeoutError
-	if errors.As(err, &timeoutErr) {
+	if timeoutErr, ok := errors.AsType[*APITimeoutError](err); ok {
 		return timeoutErr
 	}
 	if errors.Is(err, context.Canceled) {
@@ -346,8 +341,7 @@ func classifyTransportError(err error, timeout time.Duration) error {
 	if sdkErr, ok := errors.AsType[*SDKError](err); ok {
 		return sdkErr
 	}
-	var urlErr *url.Error
-	if errors.As(err, &urlErr) {
+	if urlErr, ok := errors.AsType[*url.Error](err); ok {
 		sanitized := &url.Error{
 			Op:  urlErr.Op,
 			URL: cleanURL(urlErr.URL),
@@ -355,16 +349,16 @@ func classifyTransportError(err error, timeout time.Duration) error {
 		}
 		if urlErr.Timeout() {
 			return &APITimeoutError{
-				APIConnectionError: APIConnectionError{Cause: sanitized},
-				Timeout:            timeout,
+				Cause:   sanitized,
+				Timeout: timeout,
 			}
 		}
 		err = sanitized
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return &APITimeoutError{
-			APIConnectionError: APIConnectionError{Cause: err},
-			Timeout:            timeout,
+			Cause:   err,
+			Timeout: timeout,
 		}
 	}
 	return &APIConnectionError{Message: "Connection error", Cause: err}
@@ -383,9 +377,7 @@ func logRequest(ctx context.Context, logger *slog.Logger, method, url string, he
 }
 
 func logResponse(ctx context.Context, logger *slog.Logger, method, url string, status int, elapsed time.Duration, requestID string, header http.Header, body []byte) {
-	if requestID == "" {
-		requestID = "-"
-	}
+	requestID = cmp.Or(requestID, "-")
 	if logger.Enabled(ctx, slog.LevelInfo) {
 		logger.LogAttrs(ctx, slog.LevelInfo, "response",
 			slog.String("method", method),

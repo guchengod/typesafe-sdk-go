@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 )
 
@@ -148,8 +149,7 @@ func TestRetryPolicyValidateRejectsInvalidValues(t *testing.T) {
 			if sdkErr.Cause != nil {
 				t.Errorf("Cause = %v, want nil", sdkErr.Cause)
 			}
-			var target TypeSafeError
-			if !errors.As(err, &target) {
+			if _, ok := errors.AsType[TypeSafeError](err); !ok {
 				t.Errorf("validation error does not match TypeSafeError")
 			}
 		})
@@ -751,29 +751,31 @@ func TestRetryPolicyExecuteRespectsTimeoutBudget(t *testing.T) {
 
 func TestRetryPolicyExecuteAbandonsRetryWhenElapsedBudgetIsSpent(t *testing.T) {
 	t.Parallel()
-	policy := DefaultRetryPolicy()
-	policy.MaxRetries = 10
-	policy.Timeout = new(10 * time.Millisecond)
-	policy.RandFloat = func() float64 { return 0 }
-	var delays []time.Duration
-	policy.Sleep = func(_ context.Context, delay time.Duration) error {
-		delays = append(delays, delay)
-		time.Sleep(delay)
-		return nil
-	}
-	attempts, fn := retryTestFailure(retryTestRateLimit(errorsTestHeader(HeaderRetryAfterMs, "5")), -1)
+	synctest.Test(t, func(t *testing.T) {
+		policy := DefaultRetryPolicy()
+		policy.MaxRetries = 10
+		policy.Timeout = new(10 * time.Millisecond)
+		policy.RandFloat = func() float64 { return 0 }
+		var delays []time.Duration
+		policy.Sleep = func(_ context.Context, delay time.Duration) error {
+			delays = append(delays, delay)
+			synctest.Sleep(delay)
+			return nil
+		}
+		attempts, fn := retryTestFailure(retryTestRateLimit(errorsTestHeader(HeaderRetryAfterMs, "5")), -1)
 
-	err := policy.Execute(t.Context(), fn)
-	if err == nil {
-		t.Fatal("Execute() = nil, want the rate limit failure")
-	}
-	// One 5ms retry fits inside the 10ms budget; the next delay would reach it.
-	if *attempts != 2 {
-		t.Errorf("attempts = %d, want 2", *attempts)
-	}
-	if len(delays) != 1 || delays[0] != 5*time.Millisecond {
-		t.Errorf("delays = %v, want [5ms]", delays)
-	}
+		err := policy.Execute(t.Context(), fn)
+		if err == nil {
+			t.Fatal("Execute() = nil, want the rate limit failure")
+		}
+		// One 5ms retry fits inside the 10ms budget; the next delay would reach it.
+		if *attempts != 2 {
+			t.Errorf("attempts = %d, want 2", *attempts)
+		}
+		if len(delays) != 1 || delays[0] != 5*time.Millisecond {
+			t.Errorf("delays = %v, want [5ms]", delays)
+		}
+	})
 }
 
 func TestRetryPolicyExecuteTransportErrorFlags(t *testing.T) {

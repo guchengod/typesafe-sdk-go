@@ -21,7 +21,7 @@ type benchTicketModel struct {
 	Billing  NoulAnswer   `json:"billing"`
 	Tone     ChoiceAnswer `json:"tone"`
 	Urgency  ScoreAnswer  `json:"urgency"`
-	Optional *BoxAnswer   `json:"optional,omitempty"`
+	Optional *BoxAnswer   `json:"optional,omitzero"`
 	Answers  Answers      `json:"answers"`
 }
 
@@ -91,9 +91,9 @@ func BenchmarkSystemOneAs(b *testing.B) {
 	b.ReportAllocs()
 	b.SetBytes(int64(len(fixedAnswerResponse)))
 	for iteration := 0; b.Loop(); iteration++ {
-		result, err := SystemOneAs[benchTicketModel](ctx, client, state, questions)
+		result, err := client.SystemOneAs[benchTicketModel](ctx, state, questions)
 		if err != nil {
-			b.Fatalf("SystemOneAs() error = %v", err)
+			b.Fatalf("client.SystemOneAs() error = %v", err)
 		}
 		benchSinkTicket = result
 		if iteration%1024 == 1023 {

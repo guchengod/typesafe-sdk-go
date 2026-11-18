@@ -253,9 +253,7 @@ func WithCallHeaders(headers map[string]string) RequestOption {
 		if o.extraHeaders == nil {
 			o.extraHeaders = make(map[string]string, len(headers))
 		}
-		for key, value := range headers {
-			o.extraHeaders[key] = value
-		}
+		maps.Copy(o.extraHeaders, headers)
 	}
 }
 

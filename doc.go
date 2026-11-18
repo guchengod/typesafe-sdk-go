@@ -62,11 +62,10 @@
 //		Tone    *typesafe.ChoiceAnswer `json:"tone"` // optional: a pointer can be absent
 //	}
 //
-//	result, err := typesafe.SystemOneAs[Ticket](ctx, client, state, questions)
+//	result, err := client.SystemOneAs[Ticket](ctx, state, questions)
 //
-// Alternatively, [SystemOneInto] populates an existing struct pointer in-place.
 // A top-level field that cannot represent absence — anything but a pointer, map, slice,
-// interface, function, or channel — is required, unless it is tagged omitempty or omitzero. A
+// interface, function, or channel — is required, unless it is tagged omitzero or omitempty. A
 // missing required field is reported as an [APIResponseValidationError] naming the field.
 //
 // # Patterns and Model Best Practices
@@ -115,7 +114,7 @@
 //
 // # Errors
 //
-// Failures are typed and match with errors.As. Unsuccessful HTTP statuses map onto [APIError]
+// Failures are typed and match with [errors.AsType] (or [errors.As]). Unsuccessful HTTP statuses map onto [APIError]
 // and its status-specific subclasses ([BadRequestError], [AuthenticationError],
 // [PermissionDeniedError], [NotFoundError], [UnprocessableEntityError], [PayloadTooLargeError],
 // [UnsupportedMediaTypeError], [RateLimitError], [OverloadedError], [InternalServerError]); each
@@ -152,5 +151,5 @@
 //   - Concurrency: a [Client] holds no per-request state and is safe for concurrent use; every
 //     call takes a context.Context for cancellation and deadlines.
 //   - Modern Go: for range over integers, min and max, slices and maps helpers, encoding/json/v2,
-//     and generics via [SystemOneAs]. Standard library only, and Go 1.27.3 or newer.
+//     stdlib uuid, and generic methods via [Client.SystemOneAs]. Standard library only, and Go 1.27.3 or newer.
 package typesafe

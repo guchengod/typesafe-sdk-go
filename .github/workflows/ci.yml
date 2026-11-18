@@ -11,8 +11,12 @@ permissions:
 
 jobs:
   test:
-    name: Build, vet, and test
+    name: Build, vet, and test (Go ${{ matrix.go-version }})
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        go-version: ['1.27.3', '1.27.x']
     steps:
       - uses: actions/checkout@v7
         with:
@@ -20,8 +24,17 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version: ${{ matrix.go-version }}
           check-latest: true
+
+      - name: Verify zero external dependencies
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod
+          if [ -f go.sum ]; then
+            echo "go.sum should not exist in a zero-dependency module" >&2
+            exit 1
+          fi
 
       - name: Build
         run: go build ./...
@@ -45,6 +58,7 @@ jobs:
         run: go tool cover -func=coverage.out | tail -1
 
       - name: Upload coverage
+        if: matrix.go-version == '1.27.x'
         uses: actions/upload-artifact@v7
         with:
           name: coverage
@@ -61,7 +75,7 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version: '~1.27.3'
           check-latest: true
 
       - uses: golangci/golangci-lint-action@v9
@@ -78,7 +92,7 @@ jobs:
 
       - uses: actions/setup-go@v7
         with:
-          go-version-file: go.mod
+          go-version: '~1.27.3'
           check-latest: true
 
       - name: Run govulncheck
