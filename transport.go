@@ -14,6 +14,7 @@ import (
 	"net/http"
 	"net/url"
 	"strconv"
+	"sync"
 	"time"
 )
 
@@ -27,13 +28,15 @@ func newSecureHTTPTransport() *http.Transport {
 			Timeout:   30 * time.Second,
 			KeepAlive: 30 * time.Second,
 		}).DialContext,
-		ForceAttemptHTTP2:     true,
-		MaxIdleConns:          100,
-		MaxIdleConnsPerHost:   100,
-		IdleConnTimeout:       90 * time.Second,
-		TLSHandshakeTimeout:   10 * time.Second,
-		ExpectContinueTimeout: 1 * time.Second,
-		TLSClientConfig:       &tls.Config{MinVersion: tls.VersionTLS12},
+		ForceAttemptHTTP2:      true,
+		MaxIdleConns:           100,
+		MaxIdleConnsPerHost:    100,
+		MaxConnsPerHost:        100,
+		IdleConnTimeout:        90 * time.Second,
+		TLSHandshakeTimeout:    10 * time.Second,
+		ExpectContinueTimeout:  1 * time.Second,
+		MaxResponseHeaderBytes: 256 << 10,
+		TLSClientConfig:        &tls.Config{MinVersion: tls.VersionTLS12},
 	}
 }
 
@@ -75,6 +78,7 @@ func execute(ctx context.Context, config *Config, httpClient *http.Client, req r
 	}
 
 	targetURL := config.BaseURL + req.path
+	safeURL := cleanURL(targetURL)
 	endpoint := cleanEndpoint(req.method, targetURL)
 
 	var body []byte
@@ -90,7 +94,9 @@ func execute(ctx context.Context, config *Config, httpClient *http.Client, req r
 				Message: fmt.Sprintf("The request body exceeded the %d-byte limit.", MaxRequestBodyLimit),
 			}
 		}
-		logBody = encoded
+		if config.Logger.Enabled(ctx, slog.LevelDebug) {
+			logBody = encoded
+		}
 		shouldCompress := config.Compression
 		if req.compression != nil {
 			shouldCompress = *req.compression
@@ -128,10 +134,10 @@ func execute(ctx context.Context, config *Config, httpClient *http.Client, req r
 			httpReq.Header.Set(HeaderRetryCount, strconv.Itoa(attempt))
 			if logger.Enabled(attemptCtx, slog.LevelInfo) {
 				logger.LogAttrs(attemptCtx, slog.LevelInfo, "request.retry",
-					slog.String("method", req.method), slog.String("url", targetURL), slog.Int("attempt", attempt))
+					slog.String("method", req.method), slog.String("url", safeURL), slog.Int("attempt", attempt))
 			}
 		}
-		logRequest(attemptCtx, logger, req.method, targetURL, httpReq.Header, logBody)
+		logRequest(attemptCtx, logger, req.method, safeURL, httpReq.Header, logBody)
 
 		started := time.Now()
 		httpResp, err := httpClient.Do(httpReq)
@@ -141,20 +147,23 @@ func execute(ctx context.Context, config *Config, httpClient *http.Client, req r
 				closeBody(httpResp.Body)
 			}
 			failure := classifyTransportError(err, req.timeout)
-			logFailure(attemptCtx, logger, req.method, targetURL, failure)
+			logFailure(attemptCtx, logger, req.method, safeURL, failure)
 			return failure
+		}
+		if httpResp.Body == nil {
+			httpResp.Body = http.NoBody
 		}
 		defer closeBody(httpResp.Body)
 
-		payload, err := readBody(httpResp.Body)
+		payload, err := readResponseBody(httpResp)
 		if err != nil {
 			failure := classifyTransportError(err, req.timeout)
-			logFailure(attemptCtx, logger, req.method, targetURL, failure)
+			logFailure(attemptCtx, logger, req.method, safeURL, failure)
 			return failure
 		}
 
 		requestID := httpResp.Header.Get(HeaderRequestID)
-		logResponse(attemptCtx, logger, req.method, targetURL, httpResp.StatusCode, time.Since(started), requestID, httpResp.Header, payload)
+		logResponse(attemptCtx, logger, req.method, safeURL, httpResp.StatusCode, time.Since(started), requestID, httpResp.Header, payload)
 
 		if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
 			return newAPIError(httpResp.StatusCode, decodeErrorBody(payload), payload, httpResp.Header, endpoint)
@@ -195,20 +204,26 @@ func buildHeaders(config *Config, req request, hasBody, isCompressed bool) http.
 	for name, value := range req.headers {
 		header.Set(name, value)
 	}
+	header.Del(HeaderDangerZoneLongContext)
+	header.Del(HeaderDangerZoneImages)
+	header.Del(HeaderContentEncoding)
+
+	effectiveLongContext := config.LongContext
 	if req.longContext != nil {
-		if *req.longContext {
-			header.Set(HeaderDangerZoneLongContext, "true")
-		} else {
-			header.Del(HeaderDangerZoneLongContext)
-		}
+		effectiveLongContext = *req.longContext
 	}
+	if effectiveLongContext {
+		header.Set(HeaderDangerZoneLongContext, "true")
+	}
+
+	effectiveImages := config.Images
 	if req.images != nil {
-		if *req.images {
-			header.Set(HeaderDangerZoneImages, "true")
-		} else {
-			header.Del(HeaderDangerZoneImages)
-		}
+		effectiveImages = *req.images
 	}
+	if effectiveImages {
+		header.Set(HeaderDangerZoneImages, "true")
+	}
+
 	// A caller-supplied retry count would misreport the attempt number to the server.
 	header.Del(HeaderRetryCount)
 	header.Set(HeaderAuthorization, "Bearer "+config.APIKey)
@@ -225,10 +240,25 @@ func buildHeaders(config *Config, req request, hasBody, isCompressed bool) http.
 	return header
 }
 
-// compressGzip compresses data with standard gzip.
+var gzipWriterPool = sync.Pool{
+	New: func() any {
+		return gzip.NewWriter(io.Discard)
+	},
+}
+
+// compressGzip compresses data with standard gzip, reusing pooled writers to reduce GC churn.
 func compressGzip(data []byte) ([]byte, error) {
 	var buf bytes.Buffer
-	zw := gzip.NewWriter(&buf)
+	zw, ok := gzipWriterPool.Get().(*gzip.Writer)
+	if !ok || zw == nil {
+		zw = gzip.NewWriter(&buf)
+	} else {
+		zw.Reset(&buf)
+	}
+	defer func() {
+		zw.Reset(io.Discard)
+		gzipWriterPool.Put(zw)
+	}()
 	if _, err := zw.Write(data); err != nil {
 		return nil, err
 	}
@@ -257,6 +287,25 @@ func readBody(source io.Reader) ([]byte, error) {
 	return payload, nil
 }
 
+// readResponseBody bounds 2xx bodies to [MaxResponseBodyLimit] (failing fast on Content-Length)
+// and caps non-2xx error bodies at [MaxErrorResponseBodyLimit] to prevent gzip/JSON memory amplification.
+func readResponseBody(httpResp *http.Response) ([]byte, error) {
+	if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+		payload, err := io.ReadAll(io.LimitReader(httpResp.Body, MaxErrorResponseBodyLimit+1))
+		if err != nil {
+			return nil, err
+		}
+		if len(payload) > MaxErrorResponseBodyLimit {
+			payload = payload[:MaxErrorResponseBodyLimit]
+		}
+		return payload, nil
+	}
+	if httpResp.ContentLength > MaxResponseBodyLimit {
+		return nil, &SDKError{Message: "The response body exceeded the " + strconv.Itoa(MaxResponseBodyLimit) + "-byte limit."}
+	}
+	return readBody(httpResp.Body)
+}
+
 // classifyTransportError maps a transport failure onto the SDK's timeout and connection errors.
 func classifyTransportError(err error, timeout time.Duration) error {
 	var timeoutErr *APITimeoutError
@@ -266,21 +315,29 @@ func classifyTransportError(err error, timeout time.Duration) error {
 	if errors.Is(err, context.Canceled) {
 		return err
 	}
+	if sdkErr, ok := errors.AsType[*SDKError](err); ok {
+		return sdkErr
+	}
 	var urlErr *url.Error
-	if errors.As(err, &urlErr) && urlErr.Timeout() {
-		return &APITimeoutError{
-			APIConnectionError: APIConnectionError{Cause: err},
-			Timeout:            timeout,
+	if errors.As(err, &urlErr) {
+		sanitized := &url.Error{
+			Op:  urlErr.Op,
+			URL: cleanURL(urlErr.URL),
+			Err: urlErr.Err,
 		}
+		if urlErr.Timeout() {
+			return &APITimeoutError{
+				APIConnectionError: APIConnectionError{Cause: sanitized},
+				Timeout:            timeout,
+			}
+		}
+		err = sanitized
 	}
 	if errors.Is(err, context.DeadlineExceeded) {
 		return &APITimeoutError{
 			APIConnectionError: APIConnectionError{Cause: err},
 			Timeout:            timeout,
 		}
-	}
-	if sdkErr, ok := errors.AsType[*SDKError](err); ok {
-		return sdkErr
 	}
 	return &APIConnectionError{Message: "Connection error", Cause: err}
 }
@@ -293,31 +350,33 @@ func logRequest(ctx context.Context, logger *slog.Logger, method, url string, he
 		slog.String("method", method),
 		slog.String("url", url),
 		slog.Any("headers", redactHeaders(header)),
-		slog.String("body", string(body)),
+		slog.String("body", truncateUTF8(string(body), MaxLoggedBodyBytes)),
 	)
 }
 
 func logResponse(ctx context.Context, logger *slog.Logger, method, url string, status int, elapsed time.Duration, requestID string, header http.Header, body []byte) {
-	if !logger.Enabled(ctx, slog.LevelInfo) {
-		return
-	}
 	if requestID == "" {
 		requestID = "-"
 	}
-	attrs := []slog.Attr{
-		slog.String("method", method),
-		slog.String("url", url),
-		slog.Int("status", status),
-		slog.Int64("elapsed_ms", elapsed.Milliseconds()),
-		slog.String("request_id", requestID),
-	}
-	if logger.Enabled(ctx, slog.LevelDebug) {
-		attrs = append(attrs,
-			slog.Any("headers", redactHeaders(header)),
-			slog.String("body", string(body)),
+	if logger.Enabled(ctx, slog.LevelInfo) {
+		logger.LogAttrs(ctx, slog.LevelInfo, "response",
+			slog.String("method", method),
+			slog.String("url", url),
+			slog.Int("status", status),
+			slog.Int64("elapsed_ms", elapsed.Milliseconds()),
+			slog.String("request_id", requestID),
 		)
 	}
-	logger.LogAttrs(ctx, slog.LevelInfo, "response", attrs...)
+	if logger.Enabled(ctx, slog.LevelDebug) {
+		logger.LogAttrs(ctx, slog.LevelDebug, "response.wire",
+			slog.String("method", method),
+			slog.String("url", url),
+			slog.Int("status", status),
+			slog.String("request_id", requestID),
+			slog.Any("headers", redactHeaders(header)),
+			slog.String("body", truncateUTF8(string(body), MaxLoggedBodyBytes)),
+		)
+	}
 }
 
 func logFailure(ctx context.Context, logger *slog.Logger, method, url string, err error) {

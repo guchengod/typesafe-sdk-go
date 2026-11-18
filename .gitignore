@@ -20,9 +20,23 @@ go.work
 .DS_Store
 Thumbs.db
 
-# Local environment (never commit credentials)
+# Local environment & credentials (never commit secrets)
 .env
+.env.*
+!.env.example
+*.key
+*.pem
+*.p12
+*.pfx
+secrets/
+credentials/
 
-# IDE metadata
+# IDE & local AI agent metadata
 .idea/
 .vscode/
+.agent/
+.agents/
+.pal/
+.pi/
+.worktrees/
+worktrees/

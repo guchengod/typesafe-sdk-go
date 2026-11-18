@@ -62,7 +62,7 @@ Set it to your TypeSafe API key and run the example again:
 	// The SDK redacts credentials from the records it logs. Wrapping the handler extends that to
 	// any credential-bearing attribute routed through this logger.
 	logger := slog.New(typesafe.NewRedactingHandler(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{
-		Level: slog.LevelDebug,
+		Level: slog.LevelInfo,
 	})))
 
 	client, err := typesafe.NewClient(

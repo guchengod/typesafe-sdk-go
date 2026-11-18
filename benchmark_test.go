@@ -335,7 +335,11 @@ func ExampleNormalizeQuestions() {
 		panic(err)
 	}
 	fmt.Println(slices.Sorted(maps.Keys(normalized)))
-	fmt.Println(normalized["tone"].(Question).QuestionType())
+	tone, ok := normalized["tone"].(Question)
+	if !ok {
+		panic("expected Question")
+	}
+	fmt.Println(tone.QuestionType())
 	// Output:
 	// [billing tone]
 	// choice

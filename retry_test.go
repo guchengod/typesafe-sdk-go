@@ -332,7 +332,7 @@ func TestRetryPolicyExecuteAttemptCount(t *testing.T) {
 			if len(delays) != tc.attempts-1 {
 				t.Errorf("delays = %v, want %d entries", delays, tc.attempts-1)
 			}
-			if err != failure {
+			if !errors.Is(err, failure) {
 				t.Errorf("Execute() = %v, want the last failure %v", err, failure)
 			}
 		})
@@ -388,7 +388,7 @@ func TestRetryPolicyExecuteStopsOnNonRetryableFailure(t *testing.T) {
 			if len(delays) != 0 {
 				t.Errorf("delays = %v, want none", delays)
 			}
-			if err != tc.failure {
+			if !errors.Is(err, tc.failure) {
 				t.Errorf("Execute() = %v, want %v", err, tc.failure)
 			}
 		})
@@ -736,7 +736,7 @@ func TestRetryPolicyExecuteRespectsTimeoutBudget(t *testing.T) {
 			attempts, fn := retryTestFailure(failure, -1)
 
 			err := policy.Execute(t.Context(), fn)
-			if err != failure {
+			if !errors.Is(err, failure) {
 				t.Errorf("Execute() = %v, want the last failure", err)
 			}
 			if *attempts != tc.wantAttempts {
@@ -850,7 +850,7 @@ func TestRetryPolicyExecuteTransportErrorFlags(t *testing.T) {
 			attempts, fn := retryTestFailure(tc.failure, -1)
 
 			err := policy.Execute(t.Context(), fn)
-			if err != tc.failure {
+			if !errors.Is(err, tc.failure) {
 				t.Errorf("Execute() = %v, want the last failure", err)
 			}
 			if *attempts != tc.wantAttempts {
@@ -1076,7 +1076,7 @@ func TestRetryPolicyExecuteContextCancellation(t *testing.T) {
 			cancel()
 			return failure
 		})
-		if err != failure {
+		if !errors.Is(err, failure) {
 			t.Errorf("Execute() = %v, want the failure", err)
 		}
 		if attempts != 1 {
@@ -1123,7 +1123,7 @@ func TestRetryPolicyExecuteWithNilPolicyUsesDefaults(t *testing.T) {
 		attempts, fn := retryTestFailure(failure, -1)
 
 		err := policy.Execute(t.Context(), fn)
-		if err != failure {
+		if !errors.Is(err, failure) {
 			t.Errorf("Execute() = %v, want the failure", err)
 		}
 		if *attempts != 3 {

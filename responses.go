@@ -5,6 +5,7 @@ import (
 	"encoding/json/jsontext"
 	jsonv2 "encoding/json/v2"
 	"errors"
+	"image"
 	"log/slog"
 	"math"
 	"net/http"
@@ -126,6 +127,9 @@ func (a *ScoreAnswer) LegendFor(level int) (any, bool) {
 
 // MarshalJSON encodes the rubric probabilities with their integer levels as JSON object keys.
 func (a *ScoreAnswer) MarshalJSON() ([]byte, error) {
+	if a == nil {
+		return []byte("null"), nil
+	}
 	type scoreAnswer ScoreAnswer
 	return jsonv2.Marshal(struct {
 		*scoreAnswer
@@ -161,6 +165,57 @@ type BoxCoordinates struct {
 
 	// Right is the right edge, as a fraction of image width from the left (0 to 1).
 	Right float64 `json:"right"`
+}
+
+// IsNormalized reports whether all four edges are finite fractions in [0, 1] with Top <= Bottom
+// and Left <= Right.
+func (b BoxCoordinates) IsNormalized() bool {
+	return isFinite(b.Top) && isFinite(b.Bottom) && isFinite(b.Left) && isFinite(b.Right) &&
+		b.Top >= 0 && b.Bottom <= 1 && b.Top <= b.Bottom &&
+		b.Left >= 0 && b.Right <= 1 && b.Left <= b.Right
+}
+
+// Bounds converts the fractional box coordinates into a pixel [image.Rectangle] safely clamped
+// within [0, width] x [0, height], preventing out-of-bounds slice panics on downstream cropping.
+func (b BoxCoordinates) Bounds(width, height int) image.Rectangle {
+	if width <= 0 || height <= 0 {
+		return image.Rectangle{}
+	}
+	clampUnit := func(v float64) float64 {
+		if !isFinite(v) || v < 0 {
+			return 0
+		}
+		if v > 1 {
+			return 1
+		}
+		return v
+	}
+	left := clampUnit(b.Left)
+	right := clampUnit(b.Right)
+	if left > right {
+		left, right = right, left
+	}
+	top := clampUnit(b.Top)
+	bottom := clampUnit(b.Bottom)
+	if top > bottom {
+		top, bottom = bottom, top
+	}
+	scaleCoord := func(frac float64, span int) int {
+		scaled := math.Round(frac * float64(span))
+		if scaled <= 0 {
+			return 0
+		}
+		if scaled >= float64(span) {
+			return span
+		}
+		return int(scaled)
+	}
+	return image.Rect(
+		scaleCoord(left, width),
+		scaleCoord(top, height),
+		scaleCoord(right, width),
+		scaleCoord(bottom, height),
+	)
 }
 
 // BoxAnswer is a bounding box locating an object or subject in an image.
@@ -238,12 +293,20 @@ func (r *SystemOneResponse) RawHTTPResponse() (*http.Response, error) {
 	return r.rawResponse, nil
 }
 
-// RawBody returns the response payload exactly as received, including any answer types this SDK
+// RawBody returns a copy of the response payload as received, including any answer types this SDK
 // version does not model.
-func (r *SystemOneResponse) RawBody() []byte { return r.rawBody }
+func (r *SystemOneResponse) RawBody() []byte {
+	if r == nil {
+		return nil
+	}
+	return bytes.Clone(r.rawBody)
+}
 
 // MarshalJSON encodes only the API payload, leaving HTTP metadata out of the result.
 func (r *SystemOneResponse) MarshalJSON() ([]byte, error) {
+	if r == nil {
+		return []byte("null"), nil
+	}
 	return jsonv2.Marshal(struct {
 		Model   string            `json:"model"`
 		Usage   Usage             `json:"usage"`
@@ -294,11 +357,19 @@ func (r *ListModelsResponse) RawHTTPResponse() (*http.Response, error) {
 	return r.rawResponse, nil
 }
 
-// RawBody returns the response payload exactly as received.
-func (r *ListModelsResponse) RawBody() []byte { return r.rawBody }
+// RawBody returns a copy of the response payload as received.
+func (r *ListModelsResponse) RawBody() []byte {
+	if r == nil {
+		return nil
+	}
+	return bytes.Clone(r.rawBody)
+}
 
 // MarshalJSON encodes only the API payload, leaving HTTP metadata out of the result.
 func (r *ListModelsResponse) MarshalJSON() ([]byte, error) {
+	if r == nil {
+		return []byte("null"), nil
+	}
 	return jsonv2.Marshal(struct {
 		Models []ModelMetadata `json:"models"`
 	}{r.Models}, marshalOptions)
@@ -492,6 +563,8 @@ func objectEntries(raw jsontext.Value) (map[string]jsontext.Value, bool) {
 	return entries, true
 }
 
+const maxIntPlusOneFloat = float64(uint64(1) << (strconv.IntSize - 1))
+
 // decodeCount decodes a required whole number, rejecting null, absence, a fractional value, and a
 // value outside the range of an int.
 func decodeCount(raw jsontext.Value) (int, bool) {
@@ -509,10 +582,10 @@ func decodeCount(raw jsontext.Value) (int, bool) {
 		return value, true
 	}
 	var number float64
-	if err := jsonv2.Unmarshal(raw, &number, unmarshalOptions); err != nil || math.Trunc(number) != number {
+	if err := jsonv2.Unmarshal(raw, &number, unmarshalOptions); err != nil || !isFinite(number) || math.Trunc(number) != number {
 		return 0, false
 	}
-	if number > math.MaxInt64 || number < math.MinInt64 {
+	if number >= maxIntPlusOneFloat || number < -maxIntPlusOneFloat {
 		return 0, false
 	}
 	return int(number), true
@@ -566,7 +639,7 @@ func parseSystemOneResponse(resp *response, questions []string, logger *slog.Log
 
 	result := &SystemOneResponse{
 		requestID:   resp.RequestID,
-		rawResponse: rawHTTPResponse(resp),
+		rawResponse: rawHTTPResponse(resp), //nolint:bodyclose // synthetic Response uses http.NoBody; wire body was closed in execute
 		rawBody:     resp.Body,
 		Answers:     map[string]Answer{},
 		nouls:       map[string]*NoulAnswer{},
@@ -604,6 +677,8 @@ func parseAnswers(raw jsontext.Value, questions []string, result *SystemOneRespo
 			return d.invalid(answerPath(name))
 		}
 	}
+	var firstSkippedName string
+	skippedCount := 0
 	for name, entry := range entries {
 		answer, err := parseAnswer(name, entry, d)
 		if err != nil {
@@ -612,8 +687,11 @@ func parseAnswers(raw jsontext.Value, questions []string, result *SystemOneRespo
 		switch typed := answer.(type) {
 		case nil:
 			// Forward compatibility: a type this SDK version does not model is dropped from the
-			// typed view and stays reachable through RawBody.
-			logger.Warn("Ignoring an answer with an unrecognized type", slog.String("name", name))
+			// typed view and stays reachable through RawBody. Aggregate warnings to prevent log flooding.
+			if skippedCount == 0 {
+				firstSkippedName = name
+			}
+			skippedCount++
 		case *NoulAnswer:
 			result.Answers[name], result.nouls[name] = typed, typed
 		case *ChoiceAnswer:
@@ -622,6 +700,16 @@ func parseAnswers(raw jsontext.Value, questions []string, result *SystemOneRespo
 			result.Answers[name], result.scores[name] = typed, typed
 		case *BoxAnswer:
 			result.Answers[name], result.boxes[name] = typed, typed
+		}
+	}
+	if skippedCount > 0 && logger != nil {
+		if skippedCount == 1 {
+			logger.Warn("Ignoring an answer with an unrecognized type", slog.String("name", firstSkippedName))
+		} else {
+			logger.Warn("Ignoring an answer with an unrecognized type",
+				slog.String("name", firstSkippedName),
+				slog.Int("skipped_count", skippedCount),
+			)
 		}
 	}
 	return nil
@@ -897,7 +985,7 @@ func parseListModelsResponse(resp *response) (*ListModelsResponse, error) {
 	return &ListModelsResponse{
 		Models:      models,
 		requestID:   resp.RequestID,
-		rawResponse: rawHTTPResponse(resp),
+		rawResponse: rawHTTPResponse(resp), //nolint:bodyclose // synthetic Response uses http.NoBody; wire body was closed in execute
 		rawBody:     resp.Body,
 	}, nil
 }

@@ -2,8 +2,12 @@ package typesafe
 
 import (
 	"cmp"
+	"fmt"
 	"log/slog"
+	"maps"
 	"net/http"
+	"net/netip"
+	"net/url"
 	"os"
 	"strings"
 	"time"
@@ -12,10 +16,13 @@ import (
 // Config is the resolved client configuration.
 type Config struct {
 	// APIKey is the credential sent as a bearer token.
-	APIKey string
+	APIKey string `json:"-"`
 
 	// BaseURL is the API root, without a trailing slash.
 	BaseURL string
+
+	// AllowInsecureHTTP reports whether non-loopback http:// base URLs are permitted.
+	AllowInsecureHTTP bool
 
 	// DefaultModel is the model used when a call does not name one.
 	DefaultModel string
@@ -48,24 +55,66 @@ type Config struct {
 
 	// Images enables the TypeSafe-Danger-Zone-Images header by default.
 	Images bool
+
+	imagesSet bool
+}
+
+// String formats Config with APIKey and secret headers redacted.
+func (c Config) String() string {
+	return c.redactedString()
+}
+
+// GoString formats Config for %#v with APIKey and secret headers redacted.
+func (c Config) GoString() string {
+	return c.redactedString()
+}
+
+// LogValue implements [slog.LogValuer] so logging a Config or *Config never exposes credentials.
+func (c Config) LogValue() slog.Value {
+	apiKey := ""
+	if c.APIKey != "" {
+		apiKey = "***"
+	}
+	return slog.GroupValue(
+		slog.String("api_key", apiKey),
+		slog.String("base_url", c.BaseURL),
+		slog.String("default_model", c.DefaultModel),
+		slog.Duration("timeout", c.Timeout),
+		slog.Any("default_headers", redactHeaders(c.DefaultHeaders)),
+		slog.Bool("compression", c.Compression),
+		slog.Bool("long_context", c.LongContext),
+		slog.Bool("images", c.Images),
+	)
+}
+
+func (c Config) redactedString() string {
+	apiKey := ""
+	if c.APIKey != "" {
+		apiKey = "***"
+	}
+	return fmt.Sprintf(
+		"Config{APIKey:%q, BaseURL:%q, DefaultModel:%q, Timeout:%v, DefaultHeaders:%v, Compression:%v, LongContext:%v, Images:%v}",
+		apiKey, c.BaseURL, c.DefaultModel, c.Timeout, redactHeaders(c.DefaultHeaders), c.Compression, c.LongContext, c.Images,
+	)
 }
 
 // Option configures a [Client] at construction time.
 type Option func(*configOptions)
 
 type configOptions struct {
-	apiKey         string
-	baseURL        string
-	defaultModel   string
-	timeout        *time.Duration
-	defaultHeaders http.Header
-	logger         *slog.Logger
-	retryPolicy    *RetryPolicy
-	httpClient     *http.Client
-	transport      http.RoundTripper
-	compression    *bool
-	longContext    *bool
-	images         *bool
+	apiKey            string
+	baseURL           string
+	allowInsecureHTTP *bool
+	defaultModel      string
+	timeout           *time.Duration
+	defaultHeaders    http.Header
+	logger            *slog.Logger
+	retryPolicy       *RetryPolicy
+	httpClient        *http.Client
+	transport         http.RoundTripper
+	compression       *bool
+	longContext       *bool
+	images            *bool
 }
 
 // WithCompression sets whether request bodies >= 1 KiB are compressed (gzip).
@@ -93,6 +142,12 @@ func WithAPIKey(apiKey string) Option {
 // WithBaseURL sets the API root, overriding the TYPESAFE_BASE_URL environment variable.
 func WithBaseURL(baseURL string) Option {
 	return func(o *configOptions) { o.baseURL = baseURL }
+}
+
+// WithAllowInsecureHTTP permits cleartext http:// base URLs on non-loopback hosts.
+// Loopback hosts (localhost, 127.0.0.1, ::1) are always permitted for local testing.
+func WithAllowInsecureHTTP(allow bool) Option {
+	return func(o *configOptions) { o.allowInsecureHTTP = new(allow) }
 }
 
 // WithDefaultModel sets the model used when a call does not name one, overriding the
@@ -168,6 +223,7 @@ type requestOptions struct {
 	longContext  *bool
 	images       *bool
 	assets       map[string]any
+	assetsErr    error
 }
 
 // WithCallTimeout overrides the HTTP timeout for a single call. It must be positive.
@@ -177,7 +233,7 @@ func WithCallTimeout(timeout time.Duration) RequestOption {
 
 // WithCallRetry overrides the retry policy for a single call.
 func WithCallRetry(policy *RetryPolicy) RequestOption {
-	return func(o *requestOptions) { o.retryPolicy = policy }
+	return func(o *requestOptions) { o.retryPolicy = policy.Clone() }
 }
 
 // WithCallHeader sets or overrides a request header for a single call.
@@ -228,6 +284,7 @@ func WithCallImages(enabled bool) RequestOption {
 // It accepts [Assets], map[string]Asset, or map[string]any.
 func WithAssets(assets any) RequestOption {
 	return func(o *requestOptions) {
+		o.assetsErr = nil
 		switch typed := assets.(type) {
 		case nil:
 			o.assets = nil
@@ -244,7 +301,11 @@ func WithAssets(assets any) RequestOption {
 			}
 			o.assets = m
 		case map[string]any:
-			o.assets = typed
+			o.assets = maps.Clone(typed)
+		default:
+			o.assetsErr = &SDKError{
+				Message: fmt.Sprintf("Assets must be Assets, map[string]Asset, or map[string]any, not %T.", assets),
+			}
 		}
 	}
 }
@@ -282,6 +343,18 @@ func resolveConfig(opts []Option) (*Config, error) {
 			Message: "No API key was provided. Pass WithAPIKey or set the " + APIKeyEnv + " environment variable.",
 		}
 	}
+	if err := validateAPIKey(apiKey); err != nil {
+		return nil, err
+	}
+
+	allowInsecureHTTP := false
+	if options.allowInsecureHTTP != nil {
+		allowInsecureHTTP = *options.allowInsecureHTTP
+	}
+	baseURL, err := validateBaseURL(resolveEnv(options.baseURL, BaseURLEnv, DefaultBaseURL), allowInsecureHTTP)
+	if err != nil {
+		return nil, err
+	}
 
 	timeout := DefaultTimeout
 	if options.timeout != nil {
@@ -293,11 +366,14 @@ func resolveConfig(opts []Option) (*Config, error) {
 		return nil, &SDKError{Message: "timeout must be a positive, finite number of seconds."}
 	}
 
-	policy := options.retryPolicy
-	if policy == nil {
+	var policy *RetryPolicy
+	if options.retryPolicy == nil {
 		policy = DefaultRetryPolicy()
-	} else if err := policy.Validate(); err != nil {
-		return nil, err
+	} else {
+		if err := options.retryPolicy.Validate(); err != nil {
+			return nil, err
+		}
+		policy = options.retryPolicy.Clone()
 	}
 
 	logger := options.logger
@@ -314,13 +390,18 @@ func resolveConfig(opts []Option) (*Config, error) {
 		longContext = *options.longContext
 	}
 	images := false
+	imagesSet := false
 	if options.images != nil {
 		images = *options.images
+		imagesSet = true
 	}
 
 	headers := make(http.Header, len(options.defaultHeaders)+2)
 	for name, values := range options.defaultHeaders {
 		for _, value := range values {
+			if err := validateHeaderPair(name, value); err != nil {
+				return nil, err
+			}
 			headers.Add(name, value)
 		}
 	}
@@ -332,17 +413,85 @@ func resolveConfig(opts []Option) (*Config, error) {
 	}
 
 	return &Config{
-		APIKey:         apiKey,
-		BaseURL:        strings.TrimRight(resolveEnv(options.baseURL, BaseURLEnv, DefaultBaseURL), "/"),
-		DefaultModel:   resolveEnv(options.defaultModel, DefaultModelEnv, DefaultModel),
-		Timeout:        timeout,
-		DefaultHeaders: headers,
-		Logger:         logger,
-		RetryPolicy:    policy,
-		HTTPClient:     options.httpClient,
-		Transport:      options.transport,
-		Compression:    compression,
-		LongContext:    longContext,
-		Images:         images,
+		APIKey:            apiKey,
+		BaseURL:           baseURL,
+		AllowInsecureHTTP: allowInsecureHTTP,
+		DefaultModel:      resolveEnv(options.defaultModel, DefaultModelEnv, DefaultModel),
+		Timeout:           timeout,
+		DefaultHeaders:    headers,
+		Logger:            logger,
+		RetryPolicy:       policy,
+		HTTPClient:        options.httpClient,
+		Transport:         options.transport,
+		Compression:       compression,
+		LongContext:       longContext,
+		Images:            images,
+		imagesSet:         imagesSet,
 	}, nil
+}
+
+// validateAPIKey rejects credentials containing whitespace or control characters before any
+// network attempt is made.
+func validateAPIKey(apiKey string) error {
+	if strings.IndexFunc(apiKey, func(r rune) bool {
+		return r <= 0x20 || r == 0x7f
+	}) >= 0 {
+		return &SDKError{Message: "api_key must not contain whitespace or control characters."}
+	}
+	return nil
+}
+
+// validateHeaderPair enforces RFC 7230 token syntax on header names and rejects control characters
+// in header values so invalid caller headers fail fast as an SDKError rather than retrying.
+func validateHeaderPair(name, value string) error {
+	if name == "" || strings.IndexFunc(name, func(r rune) bool {
+		return r <= 0x20 || r >= 0x7f || strings.ContainsRune(`()<>@,;:\"/[]?={}`, r)
+	}) >= 0 {
+		return &SDKError{Message: fmt.Sprintf("invalid HTTP header name %q.", name)}
+	}
+	if strings.IndexFunc(value, func(r rune) bool {
+		return (r < 0x20 && r != '\t') || r == 0x7f
+	}) >= 0 {
+		return &SDKError{Message: fmt.Sprintf("invalid control character in HTTP header %q.", name)}
+	}
+	return nil
+}
+
+// validateBaseURL parses and normalizes BaseURL, rejecting cleartext non-loopback HTTP (unless
+// explicitly enabled), embedded credentials, query parameters, and fragments.
+func validateBaseURL(raw string, allowInsecureHTTP bool) (string, error) {
+	u, err := url.Parse(raw)
+	if err != nil || u.Scheme == "" || u.Host == "" || u.Hostname() == "" || u.Opaque != "" {
+		return "", &SDKError{Message: "base_url must be a valid absolute HTTP(S) URL with a host."}
+	}
+	if u.User != nil {
+		return "", &SDKError{Message: "base_url must not contain userinfo credentials."}
+	}
+	if u.ForceQuery || u.RawQuery != "" || u.Fragment != "" {
+		return "", &SDKError{Message: "base_url must not contain query parameters or fragments."}
+	}
+	scheme := strings.ToLower(u.Scheme)
+	switch scheme {
+	case "https":
+	case "http":
+		if !allowInsecureHTTP && !isLoopbackHost(u.Hostname()) {
+			return "", &SDKError{
+				Message: "base_url must use https:// for non-loopback hosts (pass WithAllowInsecureHTTP(true) to allow cleartext http://).",
+			}
+		}
+	default:
+		return "", &SDKError{Message: fmt.Sprintf("unsupported base_url scheme %q; want https.", u.Scheme)}
+	}
+	u.Scheme = scheme
+	u.Path = strings.TrimRight(u.Path, "/")
+	u.RawPath = ""
+	return strings.TrimRight(u.String(), "/"), nil
+}
+
+func isLoopbackHost(host string) bool {
+	if strings.EqualFold(host, "localhost") {
+		return true
+	}
+	addr, err := netip.ParseAddr(host)
+	return err == nil && addr.IsLoopback()
 }

@@ -3,6 +3,8 @@ package typesafe
 import (
 	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"sync"
 	"time"
 )
@@ -16,6 +18,7 @@ import (
 type Client struct {
 	config     *Config
 	httpClient *http.Client
+	execClient *http.Client
 
 	// Models provides access to the Models API resource.
 	Models *ModelsService
@@ -38,32 +41,90 @@ func NewClient(opts ...Option) (*Client, error) {
 		return nil, err
 	}
 
-	httpClient := config.HTTPClient
-	if httpClient == nil {
-		transport := config.Transport
-		if transport == nil {
-			transport = newSecureHTTPTransport()
-		}
-		httpClient = &http.Client{
-			Transport: transport,
-			// The SDK does not follow redirects: a redirected request would carry the API key to
-			// another host and could replay a POST body there. A 3xx response is surfaced as an
-			// APIError instead. Supply WithHTTPClient to opt into redirect handling.
-			CheckRedirect: func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse },
-		}
+	httpClient, execClient := buildExecHTTPClient(config)
+	client := &Client{
+		config:     config,
+		httpClient: httpClient,
+		execClient: execClient,
 	}
-
-	client := &Client{config: config, httpClient: httpClient}
 	client.Models = &ModelsService{client: client}
 	return client, nil
 }
 
-// Config returns the resolved client configuration.
-func (c *Client) Config() *Config { return c.config }
+func buildExecHTTPClient(config *Config) (*http.Client, *http.Client) {
+	noRedirect := func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+	if config.HTTPClient == nil {
+		transport := config.Transport
+		if transport == nil {
+			transport = newSecureHTTPTransport()
+		}
+		owned := &http.Client{
+			Transport:     transport,
+			CheckRedirect: noRedirect,
+		}
+		return owned, owned
+	}
+
+	// Shallow-clone the caller's http.Client so HTTPClient() still returns the original pointer
+	// untouched while requests execute with hardened redirect and per-attempt timeout rules.
+	cloned := *config.HTTPClient
+	cloned.Timeout = 0
+	if cloned.Transport == nil {
+		cloned.Transport = newSecureHTTPTransport()
+	}
+	if cloned.CheckRedirect == nil {
+		cloned.CheckRedirect = noRedirect
+	} else {
+		callerRedirect := cloned.CheckRedirect
+		cloned.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+			if len(via) > 0 {
+				origin := via[0].URL
+				prev := via[len(via)-1].URL
+				if (strings.EqualFold(origin.Scheme, "https") || strings.EqualFold(prev.Scheme, "https")) &&
+					!strings.EqualFold(req.URL.Scheme, "https") {
+					return &SDKError{Message: "Refusing to follow HTTPS-to-HTTP redirect."}
+				}
+				if !sameOrigin(origin, req.URL) {
+					if req.Body != nil && req.Body != http.NoBody {
+						return &SDKError{Message: "Refusing to replay request body across cross-origin redirect."}
+					}
+					for name := range req.Header {
+						if isSecretHeader(name) {
+							req.Header.Del(name)
+						}
+					}
+				}
+			}
+			return callerRedirect(req, via)
+		}
+	}
+	return config.HTTPClient, &cloned
+}
+
+func sameOrigin(a, b *url.URL) bool {
+	if a == nil || b == nil {
+		return false
+	}
+	return strings.EqualFold(a.Scheme, b.Scheme) && strings.EqualFold(a.Host, b.Host)
+}
+
+// Config returns the resolved client configuration. Treat the returned Config as read-only once
+// the Client is shared across goroutines; use per-call [RequestOption] values for overrides.
+func (c *Client) Config() *Config {
+	if c == nil {
+		return nil
+	}
+	return c.config
+}
 
 // HTTPClient returns the underlying *http.Client. A client constructed with [WithHTTPClient]
 // returns that value; otherwise it returns the SDK's own client.
-func (c *Client) HTTPClient() *http.Client { return c.httpClient }
+func (c *Client) HTTPClient() *http.Client {
+	if c == nil {
+		return nil
+	}
+	return c.httpClient
+}
 
 // Close releases the connection pool held by the client's transport.
 //
@@ -71,14 +132,21 @@ func (c *Client) HTTPClient() *http.Client { return c.httpClient }
 // io.Closer, so the client owns the resources it was given. Close is idempotent: later calls
 // return the first call's error without touching the transport again.
 func (c *Client) Close() error {
+	if c == nil {
+		return nil
+	}
 	c.closeOnce.Do(func() {
-		if c.httpClient == nil || c.httpClient.Transport == nil {
+		active := c.execClient
+		if active == nil {
+			active = c.httpClient
+		}
+		if active == nil || active.Transport == nil {
 			return
 		}
-		if idle, ok := c.httpClient.Transport.(interface{ CloseIdleConnections() }); ok {
+		if idle, ok := active.Transport.(interface{ CloseIdleConnections() }); ok {
 			idle.CloseIdleConnections()
 		}
-		if closer, ok := c.httpClient.Transport.(io.Closer); ok {
+		if closer, ok := active.Transport.(io.Closer); ok {
 			c.closeErr = closer.Close()
 		}
 	})
@@ -87,9 +155,17 @@ func (c *Client) Close() error {
 
 // newRequest folds the per-call options into an executable request against the client's config.
 func (c *Client) newRequest(method, path string, body any, options requestOptions) (request, error) {
+	if options.assetsErr != nil {
+		return request{}, options.assetsErr
+	}
 	timeout, err := resolveCallTimeout(c.config.Timeout, options.timeout)
 	if err != nil {
 		return request{}, err
+	}
+	for name, value := range options.extraHeaders {
+		if err := validateHeaderPair(name, value); err != nil {
+			return request{}, err
+		}
 	}
 	return request{
 		method:      method,

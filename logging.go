@@ -54,16 +54,58 @@ func defaultLogger() *slog.Logger {
 	return slog.New(slog.NewTextHandler(os.Stderr, &slog.HandlerOptions{Level: level}))
 }
 
-// isSecretHeader reports whether a header name carries a credential and must be redacted.
+// isSecretHeader reports whether a header or attribute name carries a credential and must be redacted.
 //
-// It matches the well-known credential headers and, in addition, any header whose name mentions
-// "token" or "secret", so an unfamiliar credential header is redacted rather than logged.
+// It matches the well-known credential headers and, in addition, any name mentioning common
+// credential terms ("token", "secret", "apikey", "password", "privatekey", "credential",
+// "authkey", "subscriptionkey", "accesskey", "bearer"), regardless of separator style.
 func isSecretHeader(name string) bool {
 	lowered := strings.ToLower(strings.TrimSpace(name))
+	if lowered == "" {
+		return false
+	}
 	if _, known := secretHeaders[lowered]; known {
 		return true
 	}
-	return strings.Contains(lowered, "token") || strings.Contains(lowered, "secret")
+	normalized := stripKeySeparators(lowered)
+	for _, marker := range secretKeyMarkers {
+		if strings.Contains(normalized, marker) {
+			return true
+		}
+	}
+	return false
+}
+
+var secretKeyMarkers = []string{
+	"token",
+	"secret",
+	"apikey",
+	"password",
+	"passwd",
+	"passphrase",
+	"privatekey",
+	"credential",
+	"authkey",
+	"subscriptionkey",
+	"accesskey",
+	"clientkey",
+	"bearer",
+	"wwwauthenticate",
+	"proxyauthenticate",
+}
+
+func stripKeySeparators(s string) string {
+	if !strings.ContainsAny(s, "-_") {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := range len(s) {
+		if s[i] != '-' && s[i] != '_' {
+			b.WriteByte(s[i])
+		}
+	}
+	return b.String()
 }
 
 // redactHeaders returns a copy of headers with every credential-bearing value replaced by "***".
@@ -99,17 +141,26 @@ type RedactingHandler struct {
 
 // NewRedactingHandler wraps handler so that credential-bearing attributes are redacted.
 func NewRedactingHandler(handler slog.Handler) *RedactingHandler {
+	if handler == nil {
+		handler = discardHandler{}
+	}
 	return &RedactingHandler{handler: handler}
 }
 
 // Enabled reports whether the wrapped handler records the level.
 func (r *RedactingHandler) Enabled(ctx context.Context, level slog.Level) bool {
+	if r == nil || r.handler == nil {
+		return false
+	}
 	return r.handler.Enabled(ctx, level)
 }
 
 // Handle redacts the record's attributes and forwards it to the wrapped handler. Attributes that
 // carry no credential are passed through unchanged.
 func (r *RedactingHandler) Handle(ctx context.Context, record slog.Record) error {
+	if r == nil || r.handler == nil {
+		return nil
+	}
 	attrs := make([]slog.Attr, 0, record.NumAttrs())
 	changed := false
 	record.Attrs(func(attr slog.Attr) bool {
@@ -128,12 +179,52 @@ func (r *RedactingHandler) Handle(ctx context.Context, record slog.Record) error
 	return r.handler.Handle(ctx, clone)
 }
 
+const maxRedactDepth = 16
+
 // redactAttr returns the redacted form of an attribute and whether it changed.
 func redactAttr(attr slog.Attr) (slog.Attr, bool) {
+	return redactAttrDepth(attr, 0)
+}
+
+func redactAttrDepth(attr slog.Attr, depth int) (slog.Attr, bool) {
 	if isSecretHeader(attr.Key) {
 		return slog.String(attr.Key, "***"), true
 	}
-	switch values := attr.Value.Any().(type) {
+	if depth >= maxRedactDepth {
+		return slog.String(attr.Key, "[max-depth]"), true
+	}
+	wasLogValuer := attr.Value.Kind() == slog.KindLogValuer
+	val := attr.Value.Resolve()
+	if val.Kind() == slog.KindGroup {
+		group := val.Group()
+		redacted := make([]slog.Attr, 0, len(group))
+		groupChanged := false
+		for _, sub := range group {
+			if replacement, ok := redactAttrDepth(sub, depth+1); ok {
+				sub = replacement
+				groupChanged = true
+			}
+			redacted = append(redacted, sub)
+		}
+		if !groupChanged && !wasLogValuer {
+			return attr, false
+		}
+		return slog.Attr{Key: attr.Key, Value: slog.GroupValue(redacted...)}, true
+	}
+	if redactedVal, ok := redactAnyValue(val.Any(), depth+1); ok {
+		return slog.Attr{Key: attr.Key, Value: slog.AnyValue(redactedVal)}, true
+	}
+	if wasLogValuer {
+		return slog.Attr{Key: attr.Key, Value: val}, true
+	}
+	return attr, false
+}
+
+func redactAnyValue(raw any, depth int) (any, bool) {
+	if depth > maxRedactDepth {
+		return "[max-depth]", true
+	}
+	switch values := raw.(type) {
 	case map[string]string:
 		changed := false
 		redacted := make(map[string]string, len(values))
@@ -146,9 +237,9 @@ func redactAttr(attr slog.Attr) (slog.Attr, bool) {
 			redacted[name] = value
 		}
 		if !changed {
-			return attr, false
+			return raw, false
 		}
-		return slog.Any(attr.Key, redacted), true
+		return redacted, true
 	case http.Header:
 		changed := false
 		redacted := make(http.Header, len(values))
@@ -161,9 +252,9 @@ func redactAttr(attr slog.Attr) (slog.Attr, bool) {
 			redacted[name] = vals
 		}
 		if !changed {
-			return attr, false
+			return raw, false
 		}
-		return slog.Any(attr.Key, redacted), true
+		return redacted, true
 	case map[string][]string:
 		changed := false
 		redacted := make(map[string][]string, len(values))
@@ -176,9 +267,9 @@ func redactAttr(attr slog.Attr) (slog.Attr, bool) {
 			redacted[name] = vals
 		}
 		if !changed {
-			return attr, false
+			return raw, false
 		}
-		return slog.Any(attr.Key, redacted), true
+		return redacted, true
 	case map[string]any:
 		changed := false
 		redacted := make(map[string]any, len(values))
@@ -188,19 +279,42 @@ func redactAttr(attr slog.Attr) (slog.Attr, bool) {
 				changed = true
 				continue
 			}
+			if nested, ok := redactAnyValue(val, depth+1); ok {
+				redacted[name] = nested
+				changed = true
+				continue
+			}
 			redacted[name] = val
 		}
 		if !changed {
-			return attr, false
+			return raw, false
 		}
-		return slog.Any(attr.Key, redacted), true
+		return redacted, true
+	case []any:
+		changed := false
+		redacted := make([]any, len(values))
+		for i, item := range values {
+			if nested, ok := redactAnyValue(item, depth+1); ok {
+				redacted[i] = nested
+				changed = true
+				continue
+			}
+			redacted[i] = item
+		}
+		if !changed {
+			return raw, false
+		}
+		return redacted, true
 	default:
-		return attr, false
+		return raw, false
 	}
 }
 
 // WithAttrs returns a handler whose records carry the given attributes.
 func (r *RedactingHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
+	if r == nil || r.handler == nil {
+		return NewRedactingHandler(nil)
+	}
 	redacted := make([]slog.Attr, 0, len(attrs))
 	for _, attr := range attrs {
 		if replacement, ok := redactAttr(attr); ok {
@@ -213,5 +327,8 @@ func (r *RedactingHandler) WithAttrs(attrs []slog.Attr) slog.Handler {
 
 // WithGroup returns a handler that groups subsequent attributes under name.
 func (r *RedactingHandler) WithGroup(name string) slog.Handler {
+	if r == nil || r.handler == nil {
+		return NewRedactingHandler(nil)
+	}
 	return &RedactingHandler{handler: r.handler.WithGroup(name)}
 }

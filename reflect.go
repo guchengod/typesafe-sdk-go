@@ -17,18 +17,34 @@ func typeOf[T any]() reflect.Type { return reflect.TypeFor[T]() }
 // unexported. Only the top level is inspected: nested structures decode with standard
 // encoding/json/v2 semantics, where a missing field leaves the zero value.
 func missingRequiredField(document map[string]jsontext.Value, target reflect.Type) string {
+	return missingRequiredFieldSeen(document, target, make(map[reflect.Type]bool))
+}
+
+func missingRequiredFieldSeen(document map[string]jsontext.Value, target reflect.Type, seen map[reflect.Type]bool) string {
 	for target.Kind() == reflect.Pointer {
 		target = target.Elem()
 	}
-	if target.Kind() != reflect.Struct {
+	if target.Kind() != reflect.Struct || seen[target] {
 		return ""
 	}
+	seen[target] = true
 	for field := range target.Fields() {
 		if field.Anonymous {
-			if missing := missingRequiredField(document, field.Type); missing != "" {
-				return missing
+			tag, tagged := field.Tag.Lookup("json")
+			tagName, options, _ := strings.Cut(tag, ",")
+			if tagName == "-" || strings.Contains(options, "omitempty") || strings.Contains(options, "omitzero") {
+				continue
 			}
-			continue
+			// Named anonymous fields (e.g. `json:"meta"`) are encoded as nested objects, not promoted.
+			if !tagged || tagName == "" {
+				if field.Type.Kind() == reflect.Pointer {
+					continue
+				}
+				if missing := missingRequiredFieldSeen(document, field.Type, seen); missing != "" {
+					return missing
+				}
+				continue
+			}
 		}
 		if !field.IsExported() {
 			continue
@@ -37,12 +53,23 @@ func missingRequiredField(document map[string]jsontext.Value, target reflect.Typ
 		if optional || name == "" || canBeAbsent(field.Type) {
 			continue
 		}
-		raw, present := document[name]
-		if !present || isJSONNull(raw) {
+		if !hasNonNullDocumentField(document, name) {
 			return name
 		}
 	}
 	return ""
+}
+
+func hasNonNullDocumentField(document map[string]jsontext.Value, name string) bool {
+	if raw, present := document[name]; present {
+		return !isJSONNull(raw)
+	}
+	for key, raw := range document {
+		if strings.EqualFold(key, name) {
+			return !isJSONNull(raw)
+		}
+	}
+	return false
 }
 
 // canBeAbsent reports whether a value of the given type can represent "the server did not send

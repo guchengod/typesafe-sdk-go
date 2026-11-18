@@ -2,6 +2,7 @@ package typesafe
 
 import (
 	"bytes"
+	"context"
 	"errors"
 	"io"
 	"log/slog"
@@ -503,6 +504,162 @@ func TestSDKLoggingLevelControlsOutput(t *testing.T) {
 			if !tc.wantWire && strings.Contains(output, "headers=") {
 				t.Errorf("headers were logged below debug level:\n%s", output)
 			}
+		})
+	}
+}
+
+type testSecretLogValuer struct{ token string }
+
+func (v testSecretLogValuer) LogValue() slog.Value {
+	return slog.GroupValue(
+		slog.String("authorization", v.token),
+		slog.String("visible", "keep-me"),
+	)
+}
+
+type levelCapturingHandler struct {
+	infoRecords  []slog.Record
+	debugRecords []slog.Record
+}
+
+func (h *levelCapturingHandler) Enabled(_ context.Context, level slog.Level) bool {
+	return level >= slog.LevelDebug
+}
+
+func (h *levelCapturingHandler) Handle(_ context.Context, r slog.Record) error {
+	if r.Level >= slog.LevelInfo {
+		h.infoRecords = append(h.infoRecords, r.Clone())
+	} else {
+		h.debugRecords = append(h.debugRecords, r.Clone())
+	}
+	return nil
+}
+
+func (h *levelCapturingHandler) WithAttrs([]slog.Attr) slog.Handler { return h }
+func (h *levelCapturingHandler) WithGroup(string) slog.Handler      { return h }
+
+func TestRedactingHandlerGroupsLogValuersNestedMapsAndConfig(t *testing.T) {
+	t.Parallel()
+
+	// Nil handler guard must not panic.
+	nilWrapped := NewRedactingHandler(nil)
+	if nilWrapped.Enabled(t.Context(), slog.LevelInfo) {
+		t.Error("NewRedactingHandler(nil).Enabled(Info) = true, want false")
+	}
+
+	buffer := &bytes.Buffer{}
+	logger := slog.New(NewRedactingHandler(slog.NewJSONHandler(buffer, nil)))
+
+	client := configTestClient(t, WithAPIKey("live-config-secret"), WithHeader("X-Auth-Key", "gw-header-secret"))
+	cfg := client.Config()
+
+	// fmt formatting on Config and *Config must never expose APIKey or secret headers.
+	for _, formatted := range []string{cfg.String(), cfg.GoString(), (*cfg).String()} {
+		if strings.Contains(formatted, "live-config-secret") || strings.Contains(formatted, "gw-header-secret") {
+			t.Errorf("Config formatting leaked secret: %s", formatted)
+		}
+	}
+
+	logger.InfoContext(t.Context(), "audit",
+		slog.String("api_key", "snake-secret"),
+		slog.String("password", "pw-secret"),
+		slog.String("X-Auth-Key", "cf-secret"),
+		slog.String("Ocp-Apim-Subscription-Key", "azure-secret"),
+		slog.Group("inline_group",
+			slog.String("authorization", "Bearer inline-group-secret"),
+			slog.Group("deep_group", slog.String("private_key", "deep-pk-secret")),
+			slog.String("safe", "group-visible"),
+		),
+		slog.Any("nested_map", map[string]any{
+			"inner": map[string]any{
+				"apiKey":  "camel-secret",
+				"headers": map[string]string{"Authorization": "Bearer nested-hdr-secret"},
+				"ok":      "nested-visible",
+			},
+		}),
+		slog.Any("valuer", testSecretLogValuer{token: "valuer-secret"}),
+		slog.Any("config", cfg),
+	)
+
+	output := buffer.String()
+	for _, leaked := range []string{
+		"snake-secret", "pw-secret", "cf-secret", "azure-secret",
+		"inline-group-secret", "deep-pk-secret", "camel-secret",
+		"nested-hdr-secret", "valuer-secret", "live-config-secret", "gw-header-secret",
+	} {
+		if strings.Contains(output, leaked) {
+			t.Errorf("RedactingHandler leaked %q in output:\n%s", leaked, output)
+		}
+	}
+	for _, kept := range []string{"group-visible", "nested-visible", "keep-me"} {
+		if !strings.Contains(output, kept) {
+			t.Errorf("RedactingHandler dropped safe value %q:\n%s", kept, output)
+		}
+	}
+
+	// Cyclic map[string]any passed to RedactingHandler must terminate without stack overflow.
+	cyclic := map[string]any{"api_key": "cyclic-secret"}
+	cyclic["self"] = cyclic
+	_ = logger.Handler().Handle(t.Context(), func() slog.Record {
+		r := slog.NewRecord(time.Now(), slog.LevelInfo, "cyclic", 0)
+		r.AddAttrs(slog.Any("cycle", cyclic))
+		return r
+	}())
+}
+
+func TestLogResponseSeparatesInfoFromDebugWireAndSanitizesURLs(t *testing.T) {
+	t.Parallel()
+
+	capture := &levelCapturingHandler{}
+	logger := slog.New(capture)
+	hugeState := strings.Repeat("S", 32*1024)
+
+	client, err := NewClient(
+		WithAPIKey("test-key"),
+		WithTransport(&mockTransport{handler: func(*http.Request, int) *http.Response {
+			return JSONResponse(http.StatusOK, fixedAnswerResponse)
+		}}),
+		WithLogger(logger),
+		WithRetryPolicy(noRetryPolicy()),
+	)
+	if err != nil {
+		t.Fatalf("NewClient() error = %v", err)
+	}
+	t.Cleanup(func() { _ = client.Close() })
+
+	// Inject credentials/query on internal Config.BaseURL to verify defense-in-depth URL scrubbing in logs.
+	client.Config().BaseURL = "https://svc:url-pass@example.test/prefix?api_token=url-tok"
+
+	if _, err := client.SystemOne(t.Context(), hugeState, fixedQuestions()); err != nil {
+		t.Fatalf("SystemOne() error = %v", err)
+	}
+
+	if len(capture.infoRecords) == 0 {
+		t.Fatal("expected at least one INFO record")
+	}
+	for _, rec := range capture.infoRecords {
+		rec.Attrs(func(a slog.Attr) bool {
+			if a.Key == "headers" || a.Key == "body" {
+				t.Errorf("INFO record %q carried debug attribute %q", rec.Message, a.Key)
+			}
+			if strings.Contains(a.Value.String(), "url-pass") || strings.Contains(a.Value.String(), "url-tok") {
+				t.Errorf("INFO record leaked URL secret in %s=%q", a.Key, a.Value.String())
+			}
+			return true
+		})
+	}
+	if len(capture.debugRecords) < 2 {
+		t.Fatalf("expected request.wire and response.wire DEBUG records, got %d", len(capture.debugRecords))
+	}
+	for _, rec := range capture.debugRecords {
+		rec.Attrs(func(a slog.Attr) bool {
+			if strings.Contains(a.Value.String(), "url-pass") || strings.Contains(a.Value.String(), "url-tok") {
+				t.Errorf("DEBUG record leaked URL secret in %s=%q", a.Key, a.Value.String())
+			}
+			if a.Key == "body" && len(a.Value.String()) > MaxLoggedBodyBytes+32 {
+				t.Errorf("DEBUG body length = %d, exceeds preview limit %d", len(a.Value.String()), MaxLoggedBodyBytes)
+			}
+			return true
 		})
 	}
 }

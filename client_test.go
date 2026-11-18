@@ -579,7 +579,7 @@ func TestClientModelsListDecodesPayloadAndMetadata(t *testing.T) {
 	if got := response.RawRequestID(); got != "req_123" {
 		t.Errorf("RawRequestID() = %q, want %q", got, "req_123")
 	}
-	raw, err := response.RawHTTPResponse()
+	raw, err := response.RawHTTPResponse() //nolint:bodyclose // synthetic Response uses http.NoBody
 	if err != nil {
 		t.Fatalf("RawHTTPResponse() error = %v", err)
 	}
@@ -760,5 +760,219 @@ func TestClientDangerZoneHeaders(t *testing.T) {
 	}
 	if call.Header.Get(HeaderDangerZoneImages) != "" {
 		t.Errorf("%s present after WithCallImages(false)", HeaderDangerZoneImages)
+	}
+}
+
+func TestClientWithImagesFalseSuppressesAutoHeaderAndBlocksCallerInjection(t *testing.T) {
+	t.Parallel()
+
+	transport := clientTestAnsweringTransport(http.StatusOK, `{"model":"jev-latest","usage":{"input_tokens":10,"output_tokens":2},"answers":{"q":{"type":"noul","noul":0.5}}}`)
+	client := clientTestNewClient(t, WithTransport(transport), WithImages(false))
+
+	img, err := NewImageWithRef("ref-suppressed", []byte("image-data"), "png")
+	if err != nil {
+		t.Fatalf("NewImageWithRef failed: %v", err)
+	}
+	if _, err := client.SystemOne(t.Context(), map[string]any{"photo": img}, Questions{"q": NewNoul("test")}); err != nil {
+		t.Fatalf("SystemOne failed: %v", err)
+	}
+	if got := transport.lastCall(t).Header.Get(HeaderDangerZoneImages); got != "" {
+		t.Errorf("%s = %q when client configured WithImages(false), want empty", HeaderDangerZoneImages, got)
+	}
+
+	// Per-call WithCallImages(true) still overrides client WithImages(false).
+	if _, err := client.SystemOne(t.Context(), map[string]any{"photo": img}, Questions{"q": NewNoul("test")}, WithCallImages(true)); err != nil {
+		t.Fatalf("SystemOne failed: %v", err)
+	}
+	if got := transport.lastCall(t).Header.Get(HeaderDangerZoneImages); got != "true" {
+		t.Errorf("%s = %q when WithCallImages(true), want true", HeaderDangerZoneImages, got)
+	}
+
+	// Caller headers cannot spoof Danger-Zone or Content-Encoding headers.
+	_, err = client.SystemOne(t.Context(), "small", Questions{"q": NewNoul("test")}, WithCallHeaders(map[string]string{
+		HeaderDangerZoneLongContext: "true",
+		HeaderDangerZoneImages:      "true",
+		HeaderContentEncoding:       "br",
+	}))
+	if err != nil {
+		t.Fatalf("SystemOne failed: %v", err)
+	}
+	call := transport.lastCall(t)
+	for _, h := range []string{HeaderDangerZoneLongContext, HeaderDangerZoneImages, HeaderContentEncoding} {
+		if got := call.Header.Get(h); got != "" {
+			t.Errorf("caller injected protected header %s = %q", h, got)
+		}
+	}
+
+	// Invalid CRLF in WithCallHeader fails fast with *SDKError and 0 retries/calls.
+	beforeCalls := len(transport.callsSnapshot())
+	retryPolicy := DefaultRetryPolicy()
+	retryPolicy.MaxRetries = 3
+	_, err = client.Models.List(t.Context(), WithCallRetry(retryPolicy), WithCallHeader("X-Correlation", "bad\r\nheader"))
+	if _, ok := errors.AsType[*SDKError](err); !ok {
+		t.Fatalf("WithCallHeader CRLF error = %v (%T), want *SDKError", err, err)
+	}
+	if got := len(transport.callsSnapshot()); got != beforeCalls {
+		t.Errorf("recorded %d calls on invalid header, want %d", got, beforeCalls)
+	}
+}
+
+func TestClientSuppliedHTTPClientBlocksRedirectsAndDowngrades(t *testing.T) {
+	t.Parallel()
+
+	t.Run("nil CheckRedirect on supplied client still blocks redirects", func(t *testing.T) {
+		hops := 0
+		transport := clientTestTransport(func(req *http.Request, _ int) *http.Response {
+			hops++
+			if hops == 1 {
+				return JSONResponseWithHeaders(http.StatusFound, `{"message":"redirect"}`, map[string]string{
+					"Location": "http://api.typesafe.ai/v1/models",
+				})
+			}
+			return JSONResponse(http.StatusOK, `{"models":[]}`)
+		})
+		supplied := &http.Client{Transport: transport}
+		client := clientTestNewClient(t, WithHTTPClient(supplied))
+
+		if client.HTTPClient() != supplied {
+			t.Fatal("HTTPClient() did not preserve supplied pointer")
+		}
+		if supplied.CheckRedirect != nil {
+			t.Fatal("supplied http.Client CheckRedirect was mutated")
+		}
+
+		_, err := client.Models.List(t.Context())
+		apiErr, ok := AsAPIError(err)
+		if !ok || apiErr.Status != http.StatusFound {
+			t.Fatalf("Models.List() error = %v (%T), want 302 *APIError", err, err)
+		}
+		if hops != 1 {
+			t.Errorf("transport saw %d hops, want 1 (redirect blocked)", hops)
+		}
+	})
+
+	t.Run("explicit CheckRedirect blocks https-to-http downgrade and strips secrets cross-origin", func(t *testing.T) {
+		var redirectedAuth, redirectedAPIKey string
+		transport := clientTestTransport(func(req *http.Request, _ int) *http.Response {
+			switch req.URL.Host {
+			case "api.typesafe.ai":
+				return JSONResponseWithHeaders(http.StatusFound, `{}`, map[string]string{
+					"Location": "https://other.example.test/v1/models",
+				})
+			default:
+				redirectedAuth = req.Header.Get(HeaderAuthorization)
+				redirectedAPIKey = req.Header.Get("X-Api-Key")
+				return JSONResponse(http.StatusOK, `{"models":[]}`)
+			}
+		})
+		supplied := &http.Client{
+			Transport:     transport,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return nil },
+		}
+		client := clientTestNewClient(t, WithHTTPClient(supplied), WithHeader("X-Api-Key", "gateway-secret"))
+
+		if _, err := client.Models.List(t.Context()); err != nil {
+			t.Fatalf("Models.List() error = %v", err)
+		}
+		if redirectedAuth != "" || redirectedAPIKey != "" {
+			t.Errorf("cross-origin redirect leaked credentials: Auth=%q X-Api-Key=%q", redirectedAuth, redirectedAPIKey)
+		}
+
+		// HTTPS -> HTTP downgrade must be refused even with custom CheckRedirect.
+		downgradeTransport := clientTestTransport(func(req *http.Request, _ int) *http.Response {
+			if req.URL.Scheme == "https" {
+				return JSONResponseWithHeaders(http.StatusFound, `{}`, map[string]string{
+					"Location": "http://api.typesafe.ai/v1/models",
+				})
+			}
+			t.Error("followed https-to-http downgrade redirect")
+			return JSONResponse(http.StatusOK, `{"models":[]}`)
+		})
+		downgradeClient := clientTestNewClient(t, WithHTTPClient(&http.Client{
+			Transport:     downgradeTransport,
+			CheckRedirect: func(*http.Request, []*http.Request) error { return nil },
+		}))
+		if _, err := downgradeClient.Models.List(t.Context()); err == nil {
+			t.Fatal("Models.List() succeeded across https-to-http downgrade, want error")
+		}
+	})
+}
+
+func TestClientNilGuardsAndNilResponseBody(t *testing.T) {
+	t.Parallel()
+
+	var nilClient *Client
+	if err := nilClient.Close(); err != nil {
+		t.Errorf("(*Client)(nil).Close() = %v, want nil", err)
+	}
+	if _, err := nilClient.SystemOne(t.Context(), "x", fixedQuestions()); err == nil {
+		t.Error("(*Client)(nil).SystemOne() = nil, want *SDKError")
+	}
+	if _, err := SystemOneAs[map[string]any](t.Context(), nilClient, "x", fixedQuestions()); err == nil {
+		t.Error("SystemOneAs(nil client) = nil, want *SDKError")
+	}
+	var nilModels *ModelsService
+	if _, err := nilModels.List(t.Context()); err == nil {
+		t.Error("(*ModelsService)(nil).List() = nil, want *SDKError")
+	}
+
+	// Custom RoundTripper returning a nil Response.Body must not panic.
+	transport := clientTestTransport(func(*http.Request, int) *http.Response {
+		return &http.Response{StatusCode: http.StatusInternalServerError, Header: make(http.Header), Body: nil}
+	})
+	client := clientTestNewClient(t, WithTransport(transport))
+	_, err := client.Models.List(t.Context())
+	if apiErr, ok := AsAPIError(err); !ok || apiErr.Status != http.StatusInternalServerError {
+		t.Errorf("nil Body response error = %v (%T), want 500 *APIError", err, err)
+	}
+}
+
+func TestClientConcurrentSafetyAndWithAssetsIsolation(t *testing.T) {
+	t.Parallel()
+
+	transport := clientTestAnsweringTransport(http.StatusOK, `{"model":"jev-latest","usage":{"input_tokens":5,"output_tokens":2},"answers":{"q":{"type":"noul","noul":0.75}}}`)
+	client := clientTestNewClient(t, WithTransport(transport))
+
+	sharedLogo, err := NewImageWithRef("ref-logo", []byte("logo-bytes"), "png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	sharedAssets := map[string]any{
+		"ref-logo": sharedLogo.Asset(),
+	}
+
+	var wg sync.WaitGroup
+	for i := range 24 {
+		wg.Go(func() {
+			perReqImg, err := NewImage([]byte("tenant-secret-image"), "jpg")
+			if err != nil {
+				t.Errorf("goroutine %d NewImage: %v", i, err)
+				return
+			}
+			resp, err := client.SystemOne(
+				t.Context(),
+				map[string]any{"scan": perReqImg, "pad": strings.Repeat("p", 1200)},
+				Questions{"q": NewNoul("Is this valid?")},
+				WithAssets(sharedAssets),
+			)
+			if err != nil {
+				t.Errorf("goroutine %d SystemOne: %v", i, err)
+				return
+			}
+			// Mutating RawBody() slice must not corrupt internal response bytes.
+			raw := resp.RawBody()
+			if len(raw) > 0 {
+				raw[0] = '!'
+			}
+			if len(resp.RawBody()) > 0 && resp.RawBody()[0] == '!' {
+				t.Errorf("goroutine %d RawBody() was not defensively cloned", i)
+			}
+		})
+	}
+	wg.Wait()
+
+	// sharedAssets must still contain only ref-logo (no cross-request contamination).
+	if len(sharedAssets) != 1 {
+		t.Errorf("sharedAssets mutated across requests: got %d keys, want 1", len(sharedAssets))
 	}
 }

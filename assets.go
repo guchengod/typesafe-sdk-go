@@ -1,10 +1,12 @@
 package typesafe
 
 import (
+	"bytes"
 	"crypto/rand"
 	"encoding/base64"
 	jsonv2 "encoding/json/v2"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
@@ -58,6 +60,11 @@ func NewImageWithRef(ref string, data []byte, format string) (*Image, error) {
 	if ref == "" {
 		return nil, &SDKError{Message: "Image reference cannot be empty."}
 	}
+	if strings.IndexFunc(ref, func(r rune) bool {
+		return r < 0x20 || r == 0x7f
+	}) >= 0 {
+		return nil, &SDKError{Message: "Image reference must not contain control characters."}
+	}
 	if len(data) == 0 {
 		return nil, &SDKError{Message: "Image data cannot be empty."}
 	}
@@ -70,11 +77,12 @@ func NewImageWithRef(ref string, data []byte, format string) (*Image, error) {
 	if err != nil {
 		return nil, err
 	}
-	b64 := base64.StdEncoding.EncodeToString(data)
+	cloned := bytes.Clone(data)
+	b64 := base64.StdEncoding.EncodeToString(cloned)
 	return &Image{
 		Ref:    ref,
 		Format: normalizedFormat,
-		Data:   data,
+		Data:   cloned,
 		Base64: b64,
 	}, nil
 }
@@ -89,6 +97,11 @@ func NewImageFromBase64(ref, b64, format string) (*Image, error) {
 	if b64 == "" {
 		return nil, &SDKError{Message: "Image base64 data cannot be empty."}
 	}
+	if base64.StdEncoding.DecodedLen(len(b64)) > MaxImageSizeLimit+3 {
+		return nil, &SDKError{
+			Message: fmt.Sprintf("Image base64 data exceeds maximum limit of %d bytes (16 MiB).", MaxImageSizeLimit),
+		}
+	}
 	data, err := base64.StdEncoding.DecodeString(b64)
 	if err != nil {
 		return nil, &SDKError{Message: "Invalid base64 image data", Cause: err}
@@ -96,14 +109,115 @@ func NewImageFromBase64(ref, b64, format string) (*Image, error) {
 	return NewImageWithRef(ref, data, format)
 }
 
-// NewImageFromFile loads an image from disk and creates an Image asset.
+var (
+	pngMagic  = []byte("\x89PNG\r\n\x1a\n")
+	jpegMagic = []byte{0xff, 0xd8, 0xff}
+)
+
+// NewImageFromFile loads a regular image file from disk and creates an Image asset.
+// When loading filenames influenced by untrusted input, prefer [NewImageFromRoot] to confine reads
+// within an allowed directory.
 func NewImageFromFile(path string) (*Image, error) {
-	data, err := os.ReadFile(path)
+	normalizedFormat, err := normalizeImageFormat(strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), "."))
+	if err != nil {
+		return nil, err
+	}
+	preInfo, err := os.Stat(path)
 	if err != nil {
 		return nil, &SDKError{Message: fmt.Sprintf("Failed to read image file %q", path), Cause: err}
 	}
-	ext := strings.TrimPrefix(strings.ToLower(filepath.Ext(path)), ".")
-	return NewImage(data, ext)
+	if err := checkRegularImageInfo(preInfo, path); err != nil {
+		return nil, err
+	}
+	// #nosec G304 -- NewImageFromFile intentionally opens a caller-supplied path; NewImageFromRoot provides os.Root confinement.
+	file, err := os.Open(path)
+	if err != nil {
+		return nil, &SDKError{Message: fmt.Sprintf("Failed to read image file %q", path), Cause: err}
+	}
+	defer func() { _ = file.Close() }()
+	return readImageFile(file, path, normalizedFormat)
+}
+
+// NewImageFromRoot loads a regular image file confined within root, preventing path traversal
+// and symlink escapes outside the root directory.
+func NewImageFromRoot(root *os.Root, name string) (*Image, error) {
+	if root == nil {
+		return nil, &SDKError{Message: "Image root directory cannot be nil."}
+	}
+	normalizedFormat, err := normalizeImageFormat(strings.TrimPrefix(strings.ToLower(filepath.Ext(name)), "."))
+	if err != nil {
+		return nil, err
+	}
+	preInfo, err := root.Stat(name)
+	if err != nil {
+		return nil, &SDKError{Message: fmt.Sprintf("Failed to read image file %q", name), Cause: err}
+	}
+	if err := checkRegularImageInfo(preInfo, name); err != nil {
+		return nil, err
+	}
+	file, err := root.Open(name)
+	if err != nil {
+		return nil, &SDKError{Message: fmt.Sprintf("Failed to read image file %q", name), Cause: err}
+	}
+	defer func() { _ = file.Close() }()
+	return readImageFile(file, name, normalizedFormat)
+}
+
+func checkRegularImageInfo(info os.FileInfo, displayPath string) error {
+	if !info.Mode().IsRegular() {
+		return &SDKError{Message: fmt.Sprintf("Image path %q is not a regular file.", displayPath)}
+	}
+	if info.Size() > MaxImageSizeLimit {
+		return &SDKError{
+			Message: fmt.Sprintf("Image size %d bytes exceeds maximum limit of %d bytes (16 MiB).", info.Size(), MaxImageSizeLimit),
+		}
+	}
+	return nil
+}
+
+func readImageFile(file *os.File, displayPath, normalizedFormat string) (*Image, error) {
+	info, err := file.Stat()
+	if err != nil {
+		return nil, &SDKError{Message: fmt.Sprintf("Failed to stat image file %q", displayPath), Cause: err}
+	}
+	if err := checkRegularImageInfo(info, displayPath); err != nil {
+		return nil, err
+	}
+	data, err := io.ReadAll(io.LimitReader(file, MaxImageSizeLimit+1))
+	if err != nil {
+		return nil, &SDKError{Message: fmt.Sprintf("Failed to read image file %q", displayPath), Cause: err}
+	}
+	if len(data) > MaxImageSizeLimit {
+		return nil, &SDKError{
+			Message: fmt.Sprintf("Image size %d bytes exceeds maximum limit of %d bytes (16 MiB).", len(data), MaxImageSizeLimit),
+		}
+	}
+	if err := verifyImageMagicBytes(data, normalizedFormat); err != nil {
+		return nil, err
+	}
+	return NewImage(data, normalizedFormat)
+}
+
+// ValidateMagicBytes reports whether img's raw bytes begin with the expected PNG or JPEG file signature.
+func (img *Image) ValidateMagicBytes() error {
+	if img == nil {
+		return &SDKError{Message: "Image cannot be nil."}
+	}
+	return verifyImageMagicBytes(img.Data, img.Format)
+}
+
+func verifyImageMagicBytes(data []byte, normalizedFormat string) error {
+	switch normalizedFormat {
+	case "png":
+		if !bytes.HasPrefix(data, pngMagic) {
+			return &SDKError{Message: "Invalid PNG image data: missing PNG file signature."}
+		}
+	case "jpg":
+		if !bytes.HasPrefix(data, jpegMagic) {
+			return &SDKError{Message: "Invalid JPEG image data: missing JPEG file signature."}
+		}
+	}
+	return nil
 }
 
 // String returns the image reference string.
@@ -162,81 +276,129 @@ func normalizeImageFormat(format string) (string, error) {
 
 func newRandomRef(prefix string) string {
 	b := make([]byte, 16)
-	_, _ = rand.Read(b)
+	if _, err := rand.Read(b); err != nil {
+		panic("typesafe: crypto/rand failed: " + err.Error())
+	}
 	return fmt.Sprintf("%s-%08x-%04x-%04x-%04x-%012x", prefix, b[0:4], b[4:6], b[6:8], b[8:10], b[10:16])
 }
 
 // imagePointerType is the type the walker recognizes as an image reference.
 var imagePointerType = reflect.TypeFor[*Image]()
 
+type questionExtraCarrier interface {
+	questionExtra() map[string]any
+}
+
 // collectImagesFrom walks val recursively to discover any embedded *Image instances, so an image
 // placed in state, a question's instructions, or its criteria is registered in the request's assets.
-// It follows pointers, interfaces, exported struct fields, maps, slices, and arrays, and tolerates
-// cycles in the value graph.
-func collectImagesFrom(val any, assets map[string]any) {
+// It follows pointers, interfaces, exported struct fields, maps, slices, and arrays, tolerates
+// cycles in the value graph, and reports an error if two distinct assets collide on the same Ref.
+func collectImagesFrom(val any, assets map[string]any) error {
 	if val == nil || assets == nil {
-		return
+		return nil
 	}
-	walkImages(reflect.ValueOf(val), assets, make(map[imageVisit]bool))
+	return walkImages(reflect.ValueOf(val), assets, make(map[imageVisit]bool))
 }
 
 // imageVisit identifies a reference-typed value the walker has already visited, so a cyclic value
-// cannot recurse forever.
+// cannot recurse forever while distinct slice windows sharing a backing array are still traversed.
 type imageVisit struct {
-	typ reflect.Type
-	ptr uintptr
+	typ    reflect.Type
+	ptr    uintptr
+	length int
 }
 
 // walkImages recurses through value, collecting every reachable *Image into assets.
-func walkImages(value reflect.Value, assets map[string]any, seen map[imageVisit]bool) {
+func walkImages(value reflect.Value, assets map[string]any, seen map[imageVisit]bool) error {
 	if !value.IsValid() {
-		return
+		return nil
 	}
 	if value.Type() == imagePointerType {
 		if value.CanInterface() {
 			if image, ok := value.Interface().(*Image); ok && image != nil && image.Ref != "" {
-				assets[image.Ref] = image.Asset()
+				incoming := image.Asset()
+				if existing, exists := assets[image.Ref]; exists && !sameAssetPayload(existing, incoming) {
+					return &SDKError{
+						Message: fmt.Sprintf("Conflicting image assets share reference %q.", image.Ref),
+					}
+				}
+				assets[image.Ref] = incoming
 			}
 		}
-		return
+		return nil
 	}
 	switch value.Kind() {
 	case reflect.Interface:
 		if !value.IsNil() {
-			walkImages(value.Elem(), assets, seen)
+			return walkImages(value.Elem(), assets, seen)
 		}
 	case reflect.Pointer:
 		if !value.IsNil() && !alreadySeen(value, seen) {
-			walkImages(value.Elem(), assets, seen)
+			return walkImages(value.Elem(), assets, seen)
 		}
 	case reflect.Map:
 		if value.IsNil() || alreadySeen(value, seen) {
-			return
+			return nil
 		}
 		iterator := value.MapRange()
 		for iterator.Next() {
-			walkImages(iterator.Value(), assets, seen)
+			if err := walkImages(iterator.Value(), assets, seen); err != nil {
+				return err
+			}
 		}
 	case reflect.Slice:
 		// Byte slices are data, not containers of images; skipping them also avoids walking large
 		// payloads such as jsontext.Value.
 		if value.IsNil() || value.Type().Elem().Kind() == reflect.Uint8 || alreadySeen(value, seen) {
-			return
+			return nil
 		}
 		for index := range value.Len() {
-			walkImages(value.Index(index), assets, seen)
+			if err := walkImages(value.Index(index), assets, seen); err != nil {
+				return err
+			}
 		}
 	case reflect.Array:
 		for index := range value.Len() {
-			walkImages(value.Index(index), assets, seen)
+			if err := walkImages(value.Index(index), assets, seen); err != nil {
+				return err
+			}
 		}
 	case reflect.Struct:
+		if value.CanInterface() {
+			if carrier, ok := value.Interface().(questionExtraCarrier); ok {
+				if extra := carrier.questionExtra(); len(extra) > 0 {
+					if err := walkImages(reflect.ValueOf(extra), assets, seen); err != nil {
+						return err
+					}
+				}
+			}
+		}
 		for structField, field := range value.Fields() {
 			// Unexported fields and fields tagged `json:"-"` are not part of the JSON wire form.
 			if field.CanInterface() && !jsonIgnored(structField) {
-				walkImages(field, assets, seen)
+				if err := walkImages(field, assets, seen); err != nil {
+					return err
+				}
 			}
 		}
+	}
+	return nil
+}
+
+func sameAssetPayload(existing any, incoming Asset) bool {
+	switch typed := existing.(type) {
+	case Asset:
+		return typed == incoming
+	case *Asset:
+		return typed != nil && *typed == incoming
+	case map[string]any:
+		t, _ := typed["type"].(string)
+		f, _ := typed["format"].(string)
+		d, _ := typed["data_base64"].(string)
+		p, _ := typed["part"].(string)
+		return t == incoming.Type && f == incoming.Format && d == incoming.DataBase64 && p == incoming.Part
+	default:
+		return false
 	}
 }
 
@@ -248,7 +410,11 @@ func jsonIgnored(field reflect.StructField) bool {
 
 // alreadySeen records a reference-typed value and reports whether it was visited before.
 func alreadySeen(value reflect.Value, seen map[imageVisit]bool) bool {
-	key := imageVisit{typ: value.Type(), ptr: value.Pointer()}
+	length := 0
+	if value.Kind() == reflect.Slice {
+		length = value.Len()
+	}
+	key := imageVisit{typ: value.Type(), ptr: value.Pointer(), length: length}
 	if seen[key] {
 		return true
 	}

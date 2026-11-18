@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 )
 
@@ -86,7 +87,7 @@ func TestImageFromFile(t *testing.T) {
 
 	dir := t.TempDir()
 	path := filepath.Join(dir, "photo.jpg")
-	if err := os.WriteFile(path, []byte("fake-photo-data"), 0o600); err != nil {
+	if err := os.WriteFile(path, []byte("\xff\xd8\xff\xe0fake-photo-data"), 0o600); err != nil {
 		t.Fatalf("WriteFile failed: %v", err)
 	}
 
@@ -306,6 +307,143 @@ func TestSystemOneDoesNotOverrideExplicitImagesHeader(t *testing.T) {
 	}
 }
 
+func TestImageSecurityBoundsAndRootConfinement(t *testing.T) {
+	t.Parallel()
+
+	// Oversized base64 rejected before full decode.
+	oversizedB64 := strings.Repeat("AAAA", (MaxImageSizeLimit/3)+16)
+	if _, err := NewImageFromBase64("ref-big", oversizedB64, "png"); err == nil || !strings.Contains(err.Error(), "exceeds maximum limit") {
+		t.Errorf("NewImageFromBase64(oversized) = %v, want size limit error", err)
+	}
+
+	// Mutating caller's byte slice after NewImageWithRef must not mutate Image.Data.
+	raw := []byte("original-bytes")
+	img, err := NewImageWithRef("ref-copy", raw, "png")
+	if err != nil {
+		t.Fatalf("NewImageWithRef: %v", err)
+	}
+	raw[0] = 'X'
+	if img.Data[0] != 'o' {
+		t.Error("Image.Data aliased caller byte slice")
+	}
+
+	// Control characters in Ref are rejected.
+	if _, err := NewImageWithRef("bad\nref", []byte("ok"), "png"); err == nil {
+		t.Error("NewImageWithRef accepted control character in Ref")
+	}
+
+	// Non-regular directory and writerless FIFO paths are rejected without blocking, and non-image
+	// secret files renamed with .png/.jpg extensions are rejected by magic-byte verification.
+	dir := t.TempDir()
+	fakeDir := filepath.Join(dir, "dir.png")
+	if err := os.Mkdir(fakeDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewImageFromFile(fakeDir); err == nil {
+		t.Error("NewImageFromFile accepted directory path")
+	}
+
+	fifoPath := filepath.Join(dir, "pipe.png")
+	if err := syscall.Mkfifo(fifoPath, 0o600); err == nil {
+		if _, err := NewImageFromFile(fifoPath); err == nil {
+			t.Error("NewImageFromFile accepted FIFO path")
+		}
+	}
+
+	disguisedSecret := filepath.Join(dir, "env-secret.png")
+	if err := os.WriteFile(disguisedSecret, []byte("TYPESAFE_API_KEY=ts_live_secret"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewImageFromFile(disguisedSecret); err == nil {
+		t.Error("NewImageFromFile accepted non-PNG secret file disguised with .png extension")
+	}
+
+	// NewImageFromRoot confines reads inside root and blocks path traversal.
+	insidePath := filepath.Join(dir, "inside.png")
+	if err := os.WriteFile(insidePath, []byte("\x89PNG\r\n\x1a\npng-bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	outsideDir := t.TempDir()
+	outsideFile := filepath.Join(outsideDir, "secret.png")
+	if err := os.WriteFile(outsideFile, []byte("secret-bytes"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		t.Fatalf("os.OpenRoot: %v", err)
+	}
+	t.Cleanup(func() { _ = root.Close() })
+
+	rootedImg, err := NewImageFromRoot(root, "inside.png")
+	if err != nil || rootedImg.Format != "png" {
+		t.Fatalf("NewImageFromRoot(inside.png) = (%v, %v), want png image", rootedImg, err)
+	}
+	if _, err := NewImageFromRoot(root, "../"+filepath.Base(outsideDir)+"/secret.png"); err == nil {
+		t.Error("NewImageFromRoot allowed ../ traversal outside root")
+	}
+	if _, err := NewImageFromRoot(nil, "inside.png"); err == nil {
+		t.Error("NewImageFromRoot(nil) succeeded, want error")
+	}
+}
+
+func TestAssetsCollisionSubsliceAndExtraFieldCollection(t *testing.T) {
+	t.Parallel()
+
+	img1, err := NewImageWithRef("shared-ref", []byte("img-one"), "png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	img2, err := NewImageWithRef("shared-ref", []byte("img-two-different"), "png")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	client, transport := newMockClient(t, func(*http.Request, int) *http.Response {
+		return JSONResponse(http.StatusOK, `{"model":"jev-1.14.0","usage":{"input_tokens":1,"output_tokens":1},"answers":{"q":{"type":"noul","noul":0.5}}}`)
+	})
+
+	// Conflicting images sharing the same Ref must fail rather than silently overwriting.
+	_, err = client.SystemOne(
+		t.Context(),
+		map[string]any{"attacker": img2},
+		Questions{"q": NewNoul("Compare")},
+		WithAssets(CollectAssets(img1)),
+	)
+	if err == nil || !strings.Contains(err.Error(), "shared-ref") {
+		t.Errorf("conflicting Ref error = %v, want *SDKError naming shared-ref", err)
+	}
+
+	// Unsupported WithAssets type must return an error rather than silently dropping.
+	_, err = client.SystemOne(t.Context(), "state", Questions{"q": NewNoul("?")}, WithAssets("not-an-assets-map"))
+	if err == nil {
+		t.Error("WithAssets(string) succeeded, want *SDKError")
+	}
+
+	// Subslices sharing a backing array and images in WithQuestionField must both be collected.
+	sliceA, _ := NewImageWithRef("ref-sub-1", []byte("a"), "png")
+	sliceB, _ := NewImageWithRef("ref-sub-2", []byte("b"), "png")
+	extraImg, _ := NewImageWithRef("ref-extra-field", []byte("c"), "png")
+	backing := []*Image{sliceA, sliceB}
+	state := map[string]any{
+		"prefix": backing[:1],
+		"full":   backing[:2],
+	}
+	q := NewNoul("check", WithQuestionField("reference_image", extraImg))
+	if _, err := client.SystemOne(t.Context(), state, Questions{"q": q}); err != nil {
+		t.Fatalf("SystemOne failed: %v", err)
+	}
+	assetsMap, ok := decodingBody(t, transport.lastCall(t))["assets"].(map[string]any)
+	if !ok {
+		t.Fatal("assets missing from request body")
+	}
+	for _, wantRef := range []string{"ref-sub-1", "ref-sub-2", "ref-extra-field"} {
+		if _, exists := assetsMap[wantRef]; !exists {
+			t.Errorf("assets missing %q: got %v", wantRef, assetsMap)
+		}
+	}
+}
+
 // TestSystemOneCollectsImagesFromExtraBodyState covers the overlay running before asset collection:
 // an image in a state supplied through WithExtraBody must still become an asset.
 func TestSystemOneCollectsImagesFromExtraBodyState(t *testing.T) {
@@ -359,8 +497,12 @@ func TestCollectImagesFromHandlesCycles(t *testing.T) {
 	cyclicMap["self"] = cyclicMap
 
 	assets := map[string]any{}
-	collectImagesFrom(value, assets)
-	collectImagesFrom(cyclicMap, assets)
+	if err := collectImagesFrom(value, assets); err != nil {
+		t.Fatalf("collectImagesFrom(struct) failed: %v", err)
+	}
+	if err := collectImagesFrom(cyclicMap, assets); err != nil {
+		t.Fatalf("collectImagesFrom(map) failed: %v", err)
+	}
 	if _, ok := assets["ref-cycle"]; !ok {
 		t.Errorf("assets = %v, want ref-cycle", assets)
 	}

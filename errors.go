@@ -12,6 +12,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 )
 
 // TypeSafeError is the marker interface implemented by every error this SDK returns.
@@ -93,33 +95,31 @@ func (e *APIError) Error() string { return e.format(e.detail()) }
 // detail returns the effective message: the explicit override, else the body-derived message.
 func (e *APIError) detail() string {
 	if e.Message != "" {
-		return e.Message
+		return truncateUTF8(e.Message, MaxErrorMessageLength)
 	}
 	if message := extractMessage(e.Body); message != "" {
-		return message
+		return truncateUTF8(message, MaxErrorMessageLength)
 	}
 	if e.Body == nil {
 		return "status code (no body)"
 	}
 	raw := rawBodyString(e.Body, e.RawBody)
-	if len(raw) > MaxErrorBodyLength {
-		return raw[:MaxErrorBodyLength] + "…"
-	}
-	return raw
+	return truncateUTF8(raw, MaxErrorBodyLength)
 }
 
 // format renders "<endpoint>: <status> <detail> (request_id=<id>)" with the optional parts omitted.
 func (e *APIError) format(detail string) string {
+	detail = sanitizeControlChars(detail)
 	if detail == "" {
 		detail = strconv.Itoa(e.Status)
 	} else {
 		detail = strconv.Itoa(e.Status) + " " + detail
 	}
 	if e.Endpoint != "" {
-		detail = e.Endpoint + ": " + detail
+		detail = sanitizeControlChars(e.Endpoint) + ": " + detail
 	}
 	if e.RequestID != "" {
-		detail += " (request_id=" + e.RequestID + ")"
+		detail += " (request_id=" + sanitizeControlChars(e.RequestID) + ")"
 	}
 	return detail
 }
@@ -195,10 +195,10 @@ func (e *RateLimitError) Unwrap() error { return &e.APIError }
 
 // RetryAfter returns the server-requested wait and whether the response provided one.
 func (e *RateLimitError) RetryAfter() (time.Duration, bool) {
-	if e.RetryAfterMS == nil {
+	if e == nil || e.RetryAfterMS == nil || *e.RetryAfterMS < 0 {
 		return 0, false
 	}
-	return time.Duration(*e.RetryAfterMS * float64(time.Millisecond)), true
+	return scaleDuration(*e.RetryAfterMS, float64(time.Millisecond))
 }
 
 // OverloadedError is an HTTP 529 response indicating that TypeSafe is temporarily overloaded.
@@ -215,10 +215,10 @@ func (e *OverloadedError) Unwrap() error { return &e.APIError }
 
 // RetryAfter returns the server-requested wait and whether the response provided one.
 func (e *OverloadedError) RetryAfter() (time.Duration, bool) {
-	if e.RetryAfterMS == nil {
+	if e == nil || e.RetryAfterMS == nil || *e.RetryAfterMS < 0 {
 		return 0, false
 	}
-	return time.Duration(*e.RetryAfterMS * float64(time.Millisecond)), true
+	return scaleDuration(*e.RetryAfterMS, float64(time.Millisecond))
 }
 
 // InternalServerError is an HTTP 5xx response.
@@ -346,14 +346,99 @@ func cleanEndpoint(method, rawURL string) string {
 	if rawURL == "" {
 		return ""
 	}
+	return method + " " + cleanURL(rawURL)
+}
+
+// cleanURL strips userinfo, query parameters, and fragments from rawURL, falling back to string
+// scrubbing when url.Parse rejects malformed host or percent-encoding syntax.
+func cleanURL(rawURL string) string {
+	if rawURL == "" {
+		return ""
+	}
 	parsed, err := url.Parse(rawURL)
 	if err != nil {
-		return method + " " + rawURL
+		return fallbackCleanURL(rawURL)
 	}
 	parsed.User = nil
 	parsed.RawQuery = ""
 	parsed.Fragment = ""
-	return method + " " + parsed.String()
+	return parsed.String()
+}
+
+func fallbackCleanURL(rawURL string) string {
+	cleaned, _, _ := strings.Cut(rawURL, "#")
+	cleaned, _, _ = strings.Cut(cleaned, "?")
+	if scheme, rest, ok := strings.Cut(cleaned, "://"); ok {
+		authority, pathPart, hasSlash := strings.Cut(rest, "/")
+		if _, hostPart, hasAt := strings.CutLast(authority, "@"); hasAt {
+			if hasSlash {
+				return scheme + "://" + hostPart + "/" + pathPart
+			}
+			return scheme + "://" + hostPart
+		}
+	}
+	return cleaned
+}
+
+// sanitizeControlChars strips ANSI CSI/OSC terminal escape sequences and replaces remaining
+// C0/C1 control runes with spaces so untrusted upstream strings cannot spoof terminal or log output.
+func sanitizeControlChars(s string) string {
+	if strings.IndexFunc(s, unicode.IsControl) < 0 {
+		return s
+	}
+	var b strings.Builder
+	b.Grow(len(s))
+	for i := 0; i < len(s); {
+		if s[i] == 0x1b && i+1 < len(s) {
+			switch s[i+1] {
+			case '[':
+				i += 2
+				for i < len(s) && s[i] >= 0x20 && s[i] <= 0x3f {
+					i++
+				}
+				for i < len(s) && s[i] >= 0x20 && s[i] <= 0x2f {
+					i++
+				}
+				if i < len(s) && s[i] >= 0x40 && s[i] <= 0x7e {
+					i++
+				}
+				continue
+			case ']':
+				i += 2
+				for i < len(s) {
+					if s[i] == 0x07 {
+						i++
+						break
+					}
+					if s[i] == 0x1b && i+1 < len(s) && s[i+1] == '\\' {
+						i += 2
+						break
+					}
+					i++
+				}
+				continue
+			}
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
+		if unicode.IsControl(r) {
+			b.WriteByte(' ')
+		} else {
+			b.WriteRune(r)
+		}
+		i += size
+	}
+	return b.String()
+}
+
+// truncateUTF8 caps s at maxBytes without splitting multi-byte UTF-8 code points.
+func truncateUTF8(s string, maxBytes int) string {
+	if maxBytes <= 0 || len(s) <= maxBytes {
+		return s
+	}
+	for maxBytes > 0 && !utf8.RuneStart(s[maxBytes]) {
+		maxBytes--
+	}
+	return s[:maxBytes] + "…"
 }
 
 // parseRetryAfter reads the retry-after-ms and Retry-After response headers into a delay.
@@ -411,10 +496,12 @@ func headerValue(headers http.Header, name string) (string, bool) {
 	return "", false
 }
 
+const maxInt64PlusOneFloat = float64(uint64(1) << 63) // exact 2^63 in IEEE-754 float64
+
 // scaleDuration converts a value in unit-sized seconds to a Duration, rejecting overflow.
 func scaleDuration(value, unit float64) (time.Duration, bool) {
 	nanos := value * unit
-	if !isFinite(nanos) || nanos > float64(math.MaxInt64) {
+	if !isFinite(nanos) || nanos < 0 || nanos >= maxInt64PlusOneFloat {
 		return 0, false
 	}
 	return time.Duration(nanos), true
@@ -550,10 +637,14 @@ func newAPIError(status int, body any, rawBody []byte, headers http.Header, endp
 }
 
 // decodeErrorBody converts response bytes into the value carried by an [APIError]: the decoded
-// JSON for a JSON body, the raw text otherwise, and nil for an empty body.
+// JSON for a JSON body, the raw text otherwise, and nil for an empty body. Oversized payloads
+// beyond [MaxErrorResponseBodyLimit] are returned as bounded strings to prevent heap amplification.
 func decodeErrorBody(raw []byte) any {
 	if len(raw) == 0 {
 		return nil
+	}
+	if len(raw) > MaxErrorResponseBodyLimit {
+		return truncateUTF8(string(raw), MaxErrorMessageLength)
 	}
 	var decoded any
 	if err := jsonv2.Unmarshal(raw, &decoded, unmarshalOptions); err != nil {

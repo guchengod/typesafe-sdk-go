@@ -336,3 +336,92 @@ func TestConfigDefaultHeaderMerging(t *testing.T) {
 		}
 	})
 }
+
+func TestConfigBaseURLSecurityValidation(t *testing.T) {
+	t.Parallel()
+
+	t.Run("rejects cleartext http on non-loopback host by default", func(t *testing.T) {
+		err := configTestConstructionError(t, WithAPIKey("k"), WithBaseURL("http://api.typesafe.ai"))
+		if sdkErr, ok := errors.AsType[*SDKError](err); !ok || !strings.Contains(sdkErr.Message, "https") {
+			t.Errorf("error = %v (%T), want *SDKError mentioning https", err, err)
+		}
+	})
+
+	t.Run("allows loopback http for local testing", func(t *testing.T) {
+		for _, url := range []string{"http://localhost:8080", "http://127.0.0.1:8080", "http://[::1]:8080"} {
+			client := configTestClient(t, WithAPIKey("k"), WithBaseURL(url))
+			if client.Config().BaseURL != url {
+				t.Errorf("BaseURL = %q, want %q", client.Config().BaseURL, url)
+			}
+		}
+	})
+
+	t.Run("allows non-loopback http with WithAllowInsecureHTTP", func(t *testing.T) {
+		client := configTestClient(t, WithAPIKey("k"), WithBaseURL("http://gateway.internal:8080/"), WithAllowInsecureHTTP(true))
+		if got := client.Config().BaseURL; got != "http://gateway.internal:8080" {
+			t.Errorf("BaseURL = %q, want %q", got, "http://gateway.internal:8080")
+		}
+	})
+
+	t.Run("rejects userinfo query fragment and non-http schemes", func(t *testing.T) {
+		badURLs := []string{
+			"https://api.typesafe.ai@evil.test",
+			"https://user:secret@api.typesafe.ai",
+			"https://api.typesafe.ai?token=secret",
+			"https://api.typesafe.ai?",
+			"https://api.typesafe.ai#frag",
+			"ftp://api.typesafe.ai",
+			"://bad-url",
+			"relative/path",
+		}
+		for _, bad := range badURLs {
+			err := configTestConstructionError(t, WithAPIKey("k"), WithBaseURL(bad))
+			if _, ok := errors.AsType[*SDKError](err); !ok {
+				t.Errorf("WithBaseURL(%q) error = %v (%T), want *SDKError", bad, err, err)
+			}
+		}
+	})
+}
+
+func TestConfigRejectsControlCharactersInAPIKeyAndHeaders(t *testing.T) {
+	t.Parallel()
+
+	for _, badKey := range []string{"key\r\nX-Injected: 1", "key\x00null", "Bearer my-key", "key with spaces"} {
+		err := configTestConstructionError(t, WithAPIKey(badKey))
+		if _, ok := errors.AsType[*SDKError](err); !ok {
+			t.Errorf("WithAPIKey(%q) error = %v (%T), want *SDKError", badKey, err, err)
+		}
+	}
+
+	for _, tc := range []struct {
+		name  string
+		value string
+	}{
+		{"Bad Name", "ok"},
+		{"X-Bad\r\n", "ok"},
+		{"X-Ok", "bad\r\nvalue"},
+		{"X-Ok", "bad\x00value"},
+	} {
+		err := configTestConstructionError(t, WithAPIKey("k"), WithHeader(tc.name, tc.value))
+		if _, ok := errors.AsType[*SDKError](err); !ok {
+			t.Errorf("WithHeader(%q, %q) error = %v (%T), want *SDKError", tc.name, tc.value, err, err)
+		}
+	}
+}
+
+func TestConfigClonesRetryPolicy(t *testing.T) {
+	t.Parallel()
+
+	policy := DefaultRetryPolicy()
+	policy.MaxRetries = 2
+	client := configTestClient(t, WithAPIKey("k"), WithRetryPolicy(policy))
+
+	policy.MaxRetries = 99
+	policy.HTTPStatuses[http.StatusTeapot] = true
+	if client.Config().RetryPolicy.MaxRetries != 2 {
+		t.Errorf("Config().RetryPolicy.MaxRetries = %d, want 2", client.Config().RetryPolicy.MaxRetries)
+	}
+	if client.Config().RetryPolicy.HTTPStatuses[http.StatusTeapot] {
+		t.Error("Config().RetryPolicy.HTTPStatuses mutated after NewClient")
+	}
+}

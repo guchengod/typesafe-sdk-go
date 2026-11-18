@@ -143,10 +143,12 @@
 //   - Resilient retries: jittered exponential backoff, honoring the retry-after-ms and Retry-After
 //     headers for up to a minute, with an optional overall budget. See [RetryPolicy] and
 //     [DefaultRetryPolicy].
-//   - Security by design: credential headers are redacted from logs ([NewRedactingHandler]
-//     extends that to your own records), credentials in URLs are stripped from error endpoints,
-//     response bodies are bounded to 32 MiB, and the SDK's transport refuses TLS below 1.2.
-//     Headers the SDK owns cannot be displaced by caller-supplied ones.
+//   - Security by design: credential headers and Config values are redacted from logs
+//     ([NewRedactingHandler] extends that recursively to grouped and nested records), non-loopback
+//     cleartext http:// base URLs are rejected unless [WithAllowInsecureHTTP] opts in, untrusted
+//     image filenames can be confined with [NewImageFromRoot], credentials in URLs are stripped
+//     from logs and error endpoints, response bodies are bounded, and the SDK's transport refuses
+//     TLS below 1.2. Headers the SDK owns cannot be displaced by caller-supplied ones.
 //   - Concurrency: a [Client] holds no per-request state and is safe for concurrent use; every
 //     call takes a context.Context for cancellation and deadlines.
 //   - Modern Go: for range over integers, min and max, slices and maps helpers, encoding/json/v2,

@@ -163,7 +163,7 @@ func TestSystemOneResponseHappyPath(t *testing.T) {
 		t.Errorf("RawRequestID() = %q, want %q", response.RawRequestID(), "req-42")
 	}
 
-	raw, err := response.RawHTTPResponse()
+	raw, err := response.RawHTTPResponse() //nolint:bodyclose // synthetic Response uses http.NoBody
 	if err != nil {
 		t.Fatalf("RawHTTPResponse() error = %v", err)
 	}
@@ -641,7 +641,7 @@ func TestSystemOneResponseAccessorsWithoutHTTPMetadata(t *testing.T) {
 	if _, err := response.RequestID(); err == nil {
 		t.Error("RequestID() error = nil, want an error")
 	}
-	if _, err := response.RawHTTPResponse(); err == nil {
+	if _, err := response.RawHTTPResponse(); err == nil { //nolint:bodyclose // error-case accessor returns nil Response
 		t.Error("RawHTTPResponse() error = nil, want an error")
 	} else if got := err.Error(); !strings.Contains(got, "raw HTTP response") {
 		t.Errorf("RawHTTPResponse() error = %q, want it to mention the raw HTTP response", got)
@@ -693,9 +693,18 @@ func TestSystemOneResponseMarshalJSONEncodesOnlyThePayload(t *testing.T) {
 		t.Errorf("marshaled payload = %#v, want %#v", payload, want)
 	}
 
-	billing := response.Answers["billing"].(*NoulAnswer)
-	tone := response.Answers["tone"].(*ChoiceAnswer)
-	urgency := response.Answers["urgency"].(*ScoreAnswer)
+	billing, ok := response.Answers["billing"].(*NoulAnswer)
+	if !ok {
+		t.Fatal("expected *NoulAnswer")
+	}
+	tone, ok := response.Answers["tone"].(*ChoiceAnswer)
+	if !ok {
+		t.Fatal("expected *ChoiceAnswer")
+	}
+	urgency, ok := response.Answers["urgency"].(*ScoreAnswer)
+	if !ok {
+		t.Fatal("expected *ScoreAnswer")
+	}
 
 	// Round-tripping the payload yields the same typed field values.
 	var restored struct {
@@ -810,7 +819,7 @@ func TestListModelsResponseHappyPath(t *testing.T) {
 	if response.RawRequestID() != "req-7" {
 		t.Errorf("RawRequestID() = %q, want %q", response.RawRequestID(), "req-7")
 	}
-	raw, err := response.RawHTTPResponse()
+	raw, err := response.RawHTTPResponse() //nolint:bodyclose // synthetic Response uses http.NoBody
 	if err != nil {
 		t.Fatalf("RawHTTPResponse() error = %v", err)
 	}
@@ -925,7 +934,7 @@ func TestListModelsResponseAccessorsWithoutHTTPMetadata(t *testing.T) {
 	if _, err := response.RequestID(); err == nil {
 		t.Error("RequestID() error = nil, want an error")
 	}
-	if _, err := response.RawHTTPResponse(); err == nil {
+	if _, err := response.RawHTTPResponse(); err == nil { //nolint:bodyclose // error-case accessor returns nil Response
 		t.Error("RawHTTPResponse() error = nil, want an error")
 	}
 }
@@ -1398,4 +1407,100 @@ func TestBoxAnswerSystemOneAs(t *testing.T) {
 	if result.Mug.Confidence == nil || *result.Mug.Confidence != 0.88 {
 		t.Errorf("Mug confidence = %v, want 0.88", result.Mug.Confidence)
 	}
+}
+
+func TestSystemOneAsShadowingCycleAndBoundaryHardening(t *testing.T) {
+	t.Parallel()
+
+	t.Run("unvalidated top-level JSON key cannot shadow validated answer", func(t *testing.T) {
+		const shadowedBody = `{
+			"model": "jev-latest",
+			"usage": {"input_tokens": 10, "output_tokens": 2},
+			"billing": {"type": "noul", "noul": 0.99},
+			"BILLING": {"type": "noul", "noul": 0.99},
+			"answers": {
+				"billing": {"type": "noul", "noul": 0.12},
+				"Model": {"type": "noul", "noul": 0.5}
+			}
+		}`
+		type Verdict struct {
+			Model   string     `json:"model"`
+			Billing NoulAnswer `json:"billing"`
+		}
+		client := responseTestJSONClient(t, shadowedBody, "req-shadow")
+		got, err := SystemOneAs[Verdict](t.Context(), client, "state", Questions{
+			"billing": NewNoul("Is this billing?"),
+			"Model":   NewNoul("Case-variant question name"),
+		})
+		if err != nil {
+			t.Fatalf("SystemOneAs failed: %v", err)
+		}
+		if got.Billing.Noul != 0.12 {
+			t.Errorf("Billing.Noul = %v, want 0.12 from validated answers (not 0.99 top-level shadow)", got.Billing.Noul)
+		}
+		if got.Model != "jev-latest" {
+			t.Errorf("Model = %q, want jev-latest (protected against case-variant question)", got.Model)
+		}
+	})
+
+	t.Run("cyclic embedded struct pointer and json ignored embed do not stack overflow or fail", func(t *testing.T) {
+		type IgnoredMeta struct {
+			InternalID string `json:"internal_id"`
+		}
+		type CyclicNode struct {
+			*CyclicNode
+			IgnoredMeta `json:"-"`
+			Model       string     `json:"model"`
+			Q           NoulAnswer `json:"q"`
+		}
+		const body = `{"model":"jev-latest","usage":{"input_tokens":1,"output_tokens":1},"answers":{"q":{"type":"noul","noul":0.4}}}`
+		client := responseTestJSONClient(t, body, "req-cycle")
+		got, err := SystemOneAs[CyclicNode](t.Context(), client, "state", Questions{"q": NewNoul("?")})
+		if err != nil {
+			t.Fatalf("SystemOneAs[CyclicNode] error = %v", err)
+		}
+		if got.Q.Noul != 0.4 {
+			t.Errorf("Q.Noul = %v, want 0.4", got.Q.Noul)
+		}
+	})
+
+	t.Run("decodeCount rejects IEEE-754 2^63 overflow and nil ScoreAnswer marshals safely", func(t *testing.T) {
+		if val, ok := decodeCount([]byte("9.223372036854776e18")); ok || val < 0 {
+			t.Errorf("decodeCount(2^63) = (%d, %v), want (0, false)", val, ok)
+		}
+		encoded, err := (*ScoreAnswer)(nil).MarshalJSON()
+		if err != nil || string(encoded) != "null" {
+			t.Errorf("(*ScoreAnswer)(nil).MarshalJSON() = (%s, %v), want (null, nil)", encoded, err)
+		}
+	})
+
+	t.Run("unsolicited unknown answer types emit at most one warning per response", func(t *testing.T) {
+		logger, buf := capturedLogs()
+		const flooded = `{"model":"jev-latest","usage":{"input_tokens":1,"output_tokens":1},"answers":{
+			"q":{"type":"noul","noul":0.5},
+			"u1":{"type":"future1"},
+			"u2":{"type":"future2"},
+			"u3":{"type":"future3"}
+		}}`
+		client, _ := newMockClient(t, func(*http.Request, int) *http.Response {
+			return JSONResponse(http.StatusOK, flooded)
+		}, WithLogger(logger))
+		if _, err := client.SystemOne(t.Context(), "state", Questions{"q": NewNoul("?")}); err != nil {
+			t.Fatalf("SystemOne error = %v", err)
+		}
+		if count := strings.Count(buf.String(), "Ignoring an answer with an unrecognized type"); count != 1 {
+			t.Errorf("warning count = %d, want 1:\n%s", count, buf.String())
+		}
+	})
+
+	t.Run("BoxCoordinates Bounds safely clamps out-of-range and inverted coordinates", func(t *testing.T) {
+		box := BoxCoordinates{Top: -0.5, Bottom: 1.5, Left: 0.8, Right: 0.2}
+		if box.IsNormalized() {
+			t.Error("IsNormalized() = true for out-of-range inverted box")
+		}
+		rect := box.Bounds(100, 200)
+		if rect.Min.X < 0 || rect.Max.X > 100 || rect.Min.Y < 0 || rect.Max.Y > 200 || rect.Min.X > rect.Max.X || rect.Min.Y > rect.Max.Y {
+			t.Errorf("Bounds(100, 200) = %v, want clamped valid rectangle", rect)
+		}
+	})
 }

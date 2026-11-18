@@ -146,12 +146,22 @@ func NewNoul(instructions any, opts ...QuestionOption) *NoulQuestion {
 // QuestionType returns the wire discriminator.
 func (q *NoulQuestion) QuestionType() string { return "noul" }
 
-// Validate accepts every noul question. The request schema requires no field for a noul, so a bare
-// statement, a statement with criteria, and criteria alone are all well-formed requests.
-func (q *NoulQuestion) Validate(string) error { return nil }
+func (q NoulQuestion) questionExtra() map[string]any { return q.extra }
+
+// Validate accepts every non-nil noul question. The request schema requires no field for a noul,
+// so a bare statement, a statement with criteria, and criteria alone are all well-formed requests.
+func (q *NoulQuestion) Validate(name string) error {
+	if q == nil {
+		return nilQuestionError(name)
+	}
+	return nil
+}
 
 // MarshalJSON encodes the question, including any fields added by [WithQuestionField].
 func (q *NoulQuestion) MarshalJSON() ([]byte, error) {
+	if q == nil {
+		return []byte("null"), nil
+	}
 	type wire NoulQuestion
 	return marshalWithExtra(wire(*q), q.extra)
 }
@@ -195,11 +205,16 @@ func NewChoice(criteria map[string]any, opts ...QuestionOption) *ChoiceQuestion 
 // QuestionType returns the wire discriminator.
 func (q *ChoiceQuestion) QuestionType() string { return "choice" }
 
+func (q ChoiceQuestion) questionExtra() map[string]any { return q.extra }
+
 // Validate reports a choice question with no criteria field at all, or with more than 255 options.
 //
 // An empty criteria object is sent rather than refused: the request schema requires the field, not a
 // minimum number of entries, and the official client SDKs make no such check.
 func (q *ChoiceQuestion) Validate(name string) error {
+	if q == nil {
+		return nilQuestionError(name)
+	}
 	if q.Criteria == nil {
 		return &SDKError{Message: fmt.Sprintf("Question %q requires \"criteria\".", name)}
 	}
@@ -214,6 +229,9 @@ func (q *ChoiceQuestion) Validate(name string) error {
 
 // MarshalJSON encodes the question, including any fields added by [WithQuestionField].
 func (q *ChoiceQuestion) MarshalJSON() ([]byte, error) {
+	if q == nil {
+		return []byte("null"), nil
+	}
 	type wire ChoiceQuestion
 	return marshalWithExtra(wire(*q), q.extra)
 }
@@ -258,8 +276,13 @@ func NewScore(criteria []any, opts ...QuestionOption) *ScoreQuestion {
 // QuestionType returns the wire discriminator.
 func (q *ScoreQuestion) QuestionType() string { return "score" }
 
+func (q ScoreQuestion) questionExtra() map[string]any { return q.extra }
+
 // Validate reports a score question whose rubric does not have between 2 and 10 levels.
 func (q *ScoreQuestion) Validate(name string) error {
+	if q == nil {
+		return nilQuestionError(name)
+	}
 	if len(q.Criteria) < 2 || len(q.Criteria) > 10 {
 		return &ScoreError{Name: name}
 	}
@@ -268,6 +291,9 @@ func (q *ScoreQuestion) Validate(name string) error {
 
 // MarshalJSON encodes the question, including any fields added by [WithQuestionField].
 func (q *ScoreQuestion) MarshalJSON() ([]byte, error) {
+	if q == nil {
+		return []byte("null"), nil
+	}
 	type wire ScoreQuestion
 	return marshalWithExtra(wire(*q), q.extra)
 }
@@ -321,13 +347,29 @@ func NewBox(instructions any, opts ...QuestionOption) *BoxQuestion {
 // QuestionType returns the wire discriminator.
 func (q *BoxQuestion) QuestionType() string { return "box" }
 
-// Validate accepts every box question (box questions take no criteria).
-func (q *BoxQuestion) Validate(string) error { return nil }
+func (q BoxQuestion) questionExtra() map[string]any { return q.extra }
+
+// Validate accepts every non-nil box question (box questions take no criteria).
+func (q *BoxQuestion) Validate(name string) error {
+	if q == nil {
+		return nilQuestionError(name)
+	}
+	return nil
+}
 
 // MarshalJSON encodes the question, including any fields added by [WithQuestionField].
 func (q *BoxQuestion) MarshalJSON() ([]byte, error) {
+	if q == nil {
+		return []byte("null"), nil
+	}
 	type wire BoxQuestion
 	return marshalWithExtra(wire(*q), q.extra)
+}
+
+func nilQuestionError(name string) error {
+	return &SDKError{
+		Message: fmt.Sprintf("Question %q must be a question object or a map with a nonempty string \"type\".", name),
+	}
 }
 
 // RawQuestion is a question sent as a plain map, for request fields this SDK version does not

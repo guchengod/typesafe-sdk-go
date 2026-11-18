@@ -1202,3 +1202,51 @@ func TestBoxQuestionSerializationAndOptions(t *testing.T) {
 		t.Errorf("custom = %v, want val", decoded["custom"])
 	}
 }
+
+func TestQuestionsTypedNilSafetyAndExtraBodyValidation(t *testing.T) {
+	t.Parallel()
+
+	// Typed-nil question pointers must fail cleanly with *SDKError instead of panicking or silently passing.
+	for name, q := range map[string]Question{
+		"noul":   (*NoulQuestion)(nil),
+		"choice": (*ChoiceQuestion)(nil),
+		"score":  (*ScoreQuestion)(nil),
+		"box":    (*BoxQuestion)(nil),
+	} {
+		if _, err := NormalizeQuestions(Questions{name: q}); err == nil {
+			t.Errorf("NormalizeQuestions(%s typed-nil) = nil, want error", name)
+		}
+	}
+
+	// Calling MarshalJSON on nil question pointers must return "null" without panicking.
+	for _, fn := range []func() ([]byte, error){
+		(*NoulQuestion)(nil).MarshalJSON,
+		(*ChoiceQuestion)(nil).MarshalJSON,
+		(*ScoreQuestion)(nil).MarshalJSON,
+		(*BoxQuestion)(nil).MarshalJSON,
+	} {
+		got, err := fn()
+		if err != nil || string(got) != "null" {
+			t.Errorf("nil Question.MarshalJSON() = (%s, %v), want (null, nil)", got, err)
+		}
+	}
+
+	// Invalid questions injected via WithExtraBody must also fail validation before sending.
+	client, transport := newQuestionsClient(t)
+	_, err := client.SystemOne(
+		t.Context(),
+		"state",
+		Questions{"ok": NewNoul("valid?")},
+		WithExtraBody(map[string]any{
+			"questions": map[string]any{
+				"bad_score": map[string]any{"type": "score", "criteria": []any{"only-one"}},
+			},
+		}),
+	)
+	if err == nil {
+		t.Fatal("WithExtraBody invalid score question succeeded, want validation error")
+	}
+	if len(transport.callsSnapshot()) != 0 {
+		t.Errorf("sent %d requests for invalid extra_body questions, want 0", len(transport.callsSnapshot()))
+	}
+}

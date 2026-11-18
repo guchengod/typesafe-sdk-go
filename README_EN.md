@@ -297,7 +297,7 @@ SDK errors are strongly typed:
 ```go
 if apiErr, ok := typesafe.AsRateLimitError(err); ok {
     wait, _ := apiErr.RetryAfter()
-    time.Sleep(wait)
+    time.Sleep(min(wait, time.Minute))
 } else if ptlErr, ok := typesafe.AsPayloadTooLargeError(err); ok {
     // 413 Payload Too Large (>32 MiB)
 } else if apiErr, ok := typesafe.AsAPIError(err); ok {
@@ -335,7 +335,7 @@ typesafe ask \
 Pipe JSON output into `jq` in shell pipelines:
 
 ```bash
-curl -s https://example.test/ticket.json | typesafe ask --state - --questions questions.json | jq '.answers'
+curl -s https://example.test/ticket.json | typesafe ask --state - --questions-file questions.json | jq '.answers'
 ```
 
 ---

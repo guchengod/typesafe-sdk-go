@@ -186,7 +186,7 @@ func (p *RetryPolicy) backoff(attempt int) time.Duration {
 		}
 	}
 
-	sample := rand.Float64()
+	sample := rand.Float64() //nolint:gosec // non-cryptographic exponential backoff timing jitter
 	if p.RandFloat != nil {
 		sample = p.RandFloat()
 	}

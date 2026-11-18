@@ -6,8 +6,10 @@ import (
 	jsonv2 "encoding/json/v2"
 	"errors"
 	"fmt"
+	"maps"
 	"net/http"
 	"sort"
+	"strings"
 )
 
 // SystemOne answers named questions about text or structured state.
@@ -47,6 +49,9 @@ import (
 // for unsuccessful responses, [APIConnectionError] and [APITimeoutError] for transport failures,
 // and [APIResponseValidationError] for a success response that could not be decoded.
 func (c *Client) SystemOne(ctx context.Context, state any, questions any, opts ...RequestOption) (*SystemOneResponse, error) {
+	if c == nil || c.config == nil {
+		return nil, &SDKError{Message: "Client is not initialized; construct one with NewClient."}
+	}
 	raw, asked, err := c.systemOne(ctx, state, questions, opts)
 	if err != nil {
 		return nil, err
@@ -74,6 +79,9 @@ func (c *Client) SystemOne(ctx context.Context, state any, questions any, opts .
 // field rather than silently decoding to a zero value. Answer types this SDK version does not
 // model are dropped from the decoded document, exactly as in the [Client.SystemOne] path.
 func SystemOneAs[T any](ctx context.Context, client *Client, state any, questions any, opts ...RequestOption) (*T, error) {
+	if client == nil || client.config == nil {
+		return nil, &SDKError{Message: "Client is not initialized; construct one with NewClient."}
+	}
 	raw, asked, err := client.systemOne(ctx, state, questions, opts)
 	if err != nil {
 		return nil, err
@@ -82,7 +90,7 @@ func SystemOneAs[T any](ctx context.Context, client *Client, state any, question
 	if err != nil {
 		return nil, err
 	}
-	document, err := liftAnswers(raw.Body, parsed)
+	document, err := liftAnswers(raw, parsed, asked)
 	if err != nil {
 		return nil, err
 	}
@@ -98,6 +106,9 @@ func (c *Client) systemOne(ctx context.Context, state any, questions any, opts [
 		return nil, nil, err
 	}
 	options := resolveRequestOptions(opts)
+	if options.assetsErr != nil {
+		return nil, nil, options.assetsErr
+	}
 
 	body := map[string]any{
 		"state":     state,
@@ -110,21 +121,31 @@ func (c *Client) systemOne(ctx context.Context, state any, questions any, opts [
 	for key, value := range options.extraBody {
 		body[key] = value
 	}
+	if _, overridden := options.extraBody["questions"]; overridden {
+		validatedExtraQuestions, err := NormalizeQuestions(body["questions"])
+		if err != nil {
+			return nil, nil, err
+		}
+		body["questions"] = validatedExtraQuestions
+	}
 	// Images may appear in state, instructions, or criteria, so the final state and questions are
-	// scanned. An image the caller passes explicitly through WithAssets is merged with the ones
-	// discovered here.
-	assets := options.assets
+	// scanned into a per-call copy so concurrent or repeated requests never mutate shared caller maps.
+	assets := maps.Clone(options.assets)
 	if assets == nil {
 		assets = make(map[string]any)
 	}
-	collectImagesFrom(body["state"], assets)
-	collectImagesFrom(body["questions"], assets)
+	if err := collectImagesFrom(body["state"], assets); err != nil {
+		return nil, nil, err
+	}
+	if err := collectImagesFrom(body["questions"], assets); err != nil {
+		return nil, nil, err
+	}
 	if _, overridden := body["assets"]; !overridden && len(assets) > 0 {
 		body["assets"] = assets
 	}
 	// The images header is required for any request carrying image assets. Enable it for this call
-	// unless the caller explicitly disabled it.
-	if options.images == nil && body["assets"] != nil {
+	// unless the caller explicitly disabled it at the client or call level.
+	if options.images == nil && !c.config.imagesSet && body["assets"] != nil {
 		options.images = new(true)
 	}
 
@@ -132,7 +153,7 @@ func (c *Client) systemOne(ctx context.Context, state any, questions any, opts [
 	if err != nil {
 		return nil, nil, err
 	}
-	raw, err := execute(ctx, c.config, c.httpClient, req)
+	raw, err := execute(ctx, c.config, c.execClient, req)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -160,38 +181,77 @@ func askedQuestionNames(sent any, built map[string]any) []string {
 }
 
 // liftAnswers rebuilds the response document so that every modeled answer is also available as a
-// top-level key, and unknown answer types are excluded from the decoded view.
-func liftAnswers(body []byte, parsed *SystemOneResponse) (map[string]jsontext.Value, error) {
+// top-level key, unknown answer types are excluded from the decoded view, and unvalidated top-level
+// keys cannot shadow validated answers or canonical envelope fields.
+func liftAnswers(resp *response, parsed *SystemOneResponse, asked []string) (map[string]jsontext.Value, error) {
 	var document map[string]jsontext.Value
-	if err := jsonv2.Unmarshal(body, &document, unmarshalOptions); err != nil {
+	if err := jsonv2.Unmarshal(resp.Body, &document); err != nil {
 		return nil, &SDKError{Message: "The response body could not be decoded as JSON", Cause: err}
 	}
-	encoded, ok := document["answers"]
+	encoded, ok := findCaseInsensitiveKey(document, "answers")
 	if !ok {
 		return document, nil
 	}
 	var entries map[string]jsontext.Value
-	if err := jsonv2.Unmarshal(encoded, &entries, unmarshalOptions); err != nil {
-		return document, nil
+	if err := jsonv2.Unmarshal(encoded, &entries); err != nil {
+		return nil, newValidationError(resp, "answers")
 	}
 	modeled := make(map[string]jsontext.Value, len(parsed.Answers))
 	for name := range parsed.Answers {
-		if entry, ok := entries[name]; ok {
+		if entry, exists := entries[name]; exists {
 			modeled[name] = entry
 		}
 	}
 	if len(modeled) != len(entries) {
 		if answers, err := jsonv2.Marshal(modeled, marshalOptions); err == nil {
+			deleteCaseInsensitiveKeys(document, "answers")
 			document["answers"] = answers
 		}
 	}
+	// Clear any unvalidated top-level keys that collide with asked question names, even when an
+	// answer had an unrecognized type and was omitted from modeled.
+	askedSet := make(map[string]bool, len(asked))
+	for _, name := range asked {
+		askedSet[name] = true
+		if !isEnvelopeFieldName(name) {
+			deleteCaseInsensitiveKeys(document, name)
+		}
+	}
 	for name, entry := range modeled {
-		// Never displace a real envelope field; the SDK's own fields always win.
-		if _, exists := document[name]; !exists {
+		if isEnvelopeFieldName(name) {
+			continue
+		}
+		if askedSet[name] {
+			document[name] = entry
+		} else if _, exists := findCaseInsensitiveKey(document, name); !exists {
 			document[name] = entry
 		}
 	}
 	return document, nil
+}
+
+func isEnvelopeFieldName(name string) bool {
+	return strings.EqualFold(name, "model") ||
+		strings.EqualFold(name, "usage") ||
+		strings.EqualFold(name, "answers")
+}
+
+func findCaseInsensitiveKey(document map[string]jsontext.Value, target string) (jsontext.Value, bool) {
+	if val, ok := document[target]; ok {
+		return val, true
+	}
+	for key, val := range document {
+		if strings.EqualFold(key, target) {
+			return val, true
+		}
+	}
+	return nil, false
+}
+
+func deleteCaseInsensitiveKeys(document map[string]jsontext.Value, target string) {
+	maps.DeleteFunc(document, func(key string, _ jsontext.Value) bool {
+		return strings.EqualFold(key, target)
+	})
 }
 
 // decodeResponse decodes the lifted document into T, reporting the dotted path of the first

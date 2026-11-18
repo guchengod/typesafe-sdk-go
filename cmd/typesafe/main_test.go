@@ -49,7 +49,10 @@ func (m *memoryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 }
 
 func init() {
-	clientOptions = []typesafe.Option{typesafe.WithTransport(&memoryTransport{})}
+	clientOptions = []typesafe.Option{
+		typesafe.WithTransport(&memoryTransport{}),
+		typesafe.WithAllowInsecureHTTP(true),
+	}
 }
 
 // cliResult is what one CLI invocation produced.
@@ -604,5 +607,100 @@ func TestAskBoxAndDangerZoneFlags(t *testing.T) {
 
 	if !strings.Contains(result.stdout, "box [0.10, 0.80, 0.20, 0.70] (confidence 0.95)") {
 		t.Errorf("stdout = %q, want formatted box answer", result.stdout)
+	}
+}
+
+func TestCLISecurityHardeningFlagsAndSanitization(t *testing.T) {
+	t.Parallel()
+
+	api := newCLIAPI(t, respondJSON(cliAnswerPayload, http.StatusOK))
+	dir := t.TempDir()
+
+	// 1. --state-raw treats @file and "-" literally without reading local files or stdin.
+	secretFile := filepath.Join(dir, "secret.txt")
+	if err := os.WriteFile(secretFile, []byte("TOP-SECRET-FILE-CONTENT"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	res := runCLI(t, api, "STDIN-SHOULD-NOT-BE-READ", "ask", "--state-raw", "@"+secretFile, "--noul", "billing=Is this spam?")
+	if res.code != exitOK {
+		t.Fatalf("--state-raw @file failed: code=%d stderr=%s", res.code, res.stderr)
+	}
+	if got := api.requests[len(api.requests)-1]["state"]; got != "@"+secretFile {
+		t.Errorf("--state-raw sent %#v, want literal %q", got, "@"+secretFile)
+	}
+	if strings.Contains(res.stdout, "TOP-SECRET-FILE-CONTENT") {
+		t.Error("--state-raw leaked local file content")
+	}
+
+	resDash := runCLI(t, api, "STDIN-SECRET", "ask", "--state-raw", "-", "--noul", "billing=Is this spam?")
+	if resDash.code != exitOK {
+		t.Fatalf("--state-raw - failed: code=%d stderr=%s", resDash.code, resDash.stderr)
+	}
+	if got := api.requests[len(api.requests)-1]["state"]; got != "-" {
+		t.Errorf("--state-raw - sent %#v, want literal \"-\"", got)
+	}
+
+	// 2. --api-key-file, --state-file, and --questions-file work cleanly.
+	keyFile := filepath.Join(dir, "api.key")
+	if err := os.WriteFile(keyFile, []byte("  file-supplied-key \n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	stateFile := filepath.Join(dir, "state.json")
+	if err := os.WriteFile(stateFile, []byte(`{"ticket":"from-state-file"}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	qFile := filepath.Join(dir, "q.json")
+	if err := os.WriteFile(qFile, []byte(`{"billing":{"type":"noul","instructions":"?"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	var outBuf, errBuf bytes.Buffer
+	code := run(t.Context(), []string{
+		"--api-key-file", keyFile,
+		"--base-url", api.server.URL,
+		"ask",
+		"--state-file", stateFile,
+		"--questions-file", qFile,
+	}, &outBuf, &errBuf, strings.NewReader(""))
+	if code != exitOK {
+		t.Fatalf("file flags exit code = %d (stderr=%s)", code, errBuf.String())
+	}
+	if got := api.headers[len(api.headers)-1].Get("Authorization"); got != "Bearer file-supplied-key" {
+		t.Errorf("Authorization = %q, want Bearer file-supplied-key", got)
+	}
+
+	// 3. Non-regular directory path and excessive --retries are rejected with exitUsage.
+	resDir := runCLI(t, api, "", "ask", "--state-file", dir, "--noul", "billing=?")
+	if resDir.code != exitUsage {
+		t.Errorf("--state-file directory exit code = %d, want %d", resDir.code, exitUsage)
+	}
+	resRetries := runCLI(t, api, "", "models", "--retries", "999")
+	if resRetries.code != exitUsage {
+		t.Errorf("--retries 999 exit code = %d, want %d", resRetries.code, exitUsage)
+	}
+
+	// 4. Stdin --questions - does not probe os.Stat as a file-existence oracle.
+	resOracle := runCLI(t, api, secretFile, "ask", "--state", "hello", "--questions", "-")
+	if resOracle.code != exitUsage {
+		t.Errorf("invalid stdin questions exit code = %d, want %d", resOracle.code, exitUsage)
+	}
+	if strings.Contains(resOracle.stderr, "names a file") {
+		t.Errorf("stdin --questions leaked os.Stat file-existence oracle: %s", resOracle.stderr)
+	}
+
+	// 5. Terminal ANSI/OSC escape sequences in --format text output are stripped.
+	ansiModels := `{"models":[{"name":"jev\u001b[31m-evil","description":"desc\u001b]52;c;pwn\u0007","release_date":"2026-09-10"}]}`
+	ansiAPI := newCLIAPI(t, respondJSON(ansiModels, http.StatusOK))
+	resANSI := runCLI(t, ansiAPI, "", "models", "--format", "text")
+	if resANSI.code != exitOK {
+		t.Fatalf("models text failed: %s", resANSI.stderr)
+	}
+	if strings.ContainsRune(resANSI.stdout, '\x1b') || strings.ContainsRune(resANSI.stdout, '\x07') {
+		t.Errorf("CLI text output retained terminal escape sequences: %q", resANSI.stdout)
+	}
+
+	// 6. Nil (*stringList).String() does not panic.
+	var nilList *stringList
+	if got := nilList.String(); got != "" {
+		t.Errorf("(*stringList)(nil).String() = %q, want empty", got)
 	}
 }

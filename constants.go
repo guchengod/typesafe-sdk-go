@@ -10,7 +10,7 @@ import (
 // Environment variable names.
 const (
 	// APIKeyEnv is the environment variable for the TypeSafe API key.
-	APIKeyEnv = "TYPESAFE_API_KEY"
+	APIKeyEnv = "TYPESAFE_API_KEY" //nolint:gosec // environment variable name, not a hardcoded credential
 
 	// BaseURLEnv is the environment variable for the API base URL.
 	BaseURLEnv = "TYPESAFE_BASE_URL"
@@ -54,6 +54,16 @@ const (
 
 	// MaxErrorBodyLength limits the raw error body length included in error messages.
 	MaxErrorBodyLength = 200
+
+	// MaxErrorMessageLength bounds extracted error detail messages so multi-megabyte upstream
+	// bodies cannot flood error strings or logs.
+	MaxErrorMessageLength = 4096
+
+	// MaxErrorResponseBodyLimit bounds non-2xx HTTP error bodies decoded into memory (256 KiB).
+	MaxErrorResponseBodyLimit = 256 * 1024
+
+	// MaxLoggedBodyBytes bounds request and response wire body previews in debug logs (16 KiB).
+	MaxLoggedBodyBytes = 16 * 1024
 
 	// MaxRequestBodyLimit is the maximum request body size (32 MiB) accepted by the API.
 	MaxRequestBodyLimit = 32 * 1024 * 1024

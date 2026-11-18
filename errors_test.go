@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 )
 
 // errorsTestHeader builds an http.Header from alternating name and value pairs. Repeating a name
@@ -217,6 +218,12 @@ func TestCleanEndpointStripsCredentialsQueryAndFragment(t *testing.T) {
 		{"empty url", "POST", "", ""},
 		{"unparseable url", "GET", "://bad", "GET ://bad"},
 		{"unparseable host", "GET", "http://[::1", "GET http://[::1"},
+		{
+			"unparseable url with credentials query and fragment",
+			"GET",
+			"https://user:p@ss@[::1/v1/models?token=secret#frag",
+			"GET https://[::1/v1/models",
+		},
 	}
 
 	for _, tc := range cases {
@@ -689,7 +696,7 @@ func TestSDKErrorMessageAndCause(t *testing.T) {
 		if !errors.Is(err, cause) {
 			t.Errorf("errors.Is(err, cause) = false, want true")
 		}
-		if got := err.Unwrap(); got != cause {
+		if got := err.Unwrap(); !errors.Is(got, cause) {
 			t.Errorf("Unwrap() = %v, want %v", got, cause)
 		}
 	})
@@ -770,7 +777,7 @@ func TestAPITimeoutErrorMessageText(t *testing.T) {
 		if !errors.Is(err, cause) {
 			t.Errorf("errors.Is(err, cause) = false, want true")
 		}
-		if got := err.Unwrap(); got != cause {
+		if got := err.Unwrap(); !errors.Is(got, cause) {
 			t.Errorf("Unwrap() = %v, want %v", got, cause)
 		}
 	})
@@ -823,7 +830,7 @@ func TestAPIErrorMessageOverridePreservesBodyAndHeaders(t *testing.T) {
 	body := errorsTestMessageBody("Server explanation")
 	headers := errorsTestHeader(HeaderRetryAfterMs, "125")
 	raw := []byte(`{"message":"Server explanation"}`)
-	err, ok := newAPIError(http.StatusTooManyRequests, body, raw, headers, "").(*RateLimitError)
+	err, ok := errors.AsType[*RateLimitError](newAPIError(http.StatusTooManyRequests, body, raw, headers, ""))
 	if !ok {
 		t.Fatalf("newAPIError(429) type = %T, want *RateLimitError", err)
 	}
@@ -934,5 +941,55 @@ func TestPayloadTooLargeAndUnsupportedMediaTypeExtractors(t *testing.T) {
 
 	if _, ok := AsPayloadTooLargeError(err415); ok {
 		t.Errorf("AsPayloadTooLargeError(err415) = true, want false")
+	}
+}
+
+func TestScaleDurationIEEE754BoundaryAndErrorSanitization(t *testing.T) {
+	t.Parallel()
+
+	// Exact IEEE-754 2^63 nanosecond boundary must be rejected rather than overflowing to negative int64.
+	if got, ok := parseRetryAfter(errorsTestHeader(HeaderRetryAfter, "9223372036.854776")); ok || got < 0 {
+		t.Errorf("parseRetryAfter(2^63 ns boundary) = (%v, %v), want (0, false)", got, ok)
+	}
+	rl := &RateLimitError{RetryAfterMS: new(1e19)}
+	if got, ok := rl.RetryAfter(); ok || got < 0 {
+		t.Errorf("RateLimitError{1e19}.RetryAfter() = (%v, %v), want (0, false)", got, ok)
+	}
+
+	// Raw fallback truncation must never split a multi-byte UTF-8 rune.
+	rawMultiByte := []byte(`{"x":"` + strings.Repeat("a", 192) + `🌍"}`)
+	apiErr := &APIError{Status: 400, Body: map[string]any{"x": "v"}, RawBody: rawMultiByte}
+	if !utf8.ValidString(apiErr.Error()) {
+		t.Errorf("APIError.Error() produced invalid UTF-8: %q", apiErr.Error())
+	}
+
+	// Multi-megabyte string/HTML error bodies are bounded by MaxErrorMessageLength.
+	hugeHTML := strings.Repeat("H", MaxErrorMessageLength*4)
+	hugeErr := newAPIError(502, decodeErrorBody([]byte(hugeHTML)), []byte(hugeHTML), make(http.Header), "POST https://api.typesafe.ai/v1/systemone")
+	if len(hugeErr.Error()) > MaxErrorMessageLength+128 {
+		t.Errorf("huge error length = %d, exceeds MaxErrorMessageLength bound", len(hugeErr.Error()))
+	}
+
+	// Multi-megabyte / >256 KiB non-2xx error responses through Client are capped at MaxErrorResponseBodyLimit.
+	oversizedNon2xx := strings.Repeat("E", MaxErrorResponseBodyLimit+4096)
+	errClient, _ := newMockClient(t, func(*http.Request, int) *http.Response {
+		return JSONResponse(http.StatusBadGateway, oversizedNon2xx)
+	})
+	_, gwErr := errClient.Models.List(t.Context())
+	if apiErr, ok := AsAPIError(gwErr); !ok {
+		t.Fatalf("Models.List() 502 error = %v (%T), want *APIError", gwErr, gwErr)
+	} else if len(apiErr.RawBody) > MaxErrorResponseBodyLimit {
+		t.Errorf("RawBody length = %d, exceeds MaxErrorResponseBodyLimit %d", len(apiErr.RawBody), MaxErrorResponseBodyLimit)
+	}
+
+	// ANSI/OSC terminal escape sequences in detail and RequestID are neutralized.
+	ansiErr := &APIError{
+		Status:    400,
+		Message:   "bad \x1b[31mred\x1b[0m\nforged-line",
+		RequestID: "req\x1b]52;c;evil\x07",
+	}
+	rendered := ansiErr.Error()
+	if strings.ContainsRune(rendered, '\x1b') || strings.ContainsRune(rendered, '\n') || strings.ContainsRune(rendered, '\x07') {
+		t.Errorf("APIError.Error() retained terminal control sequences: %q", rendered)
 	}
 }
