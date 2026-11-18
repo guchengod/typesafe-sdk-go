@@ -20,6 +20,8 @@ import (
 	"time"
 )
 
+var errAttemptTimeout = errors.New("attempt timeout")
+
 // Pre-canonicalized MIME header keys avoid per-request allocations inside textproto.CanonicalMIMEHeaderKey
 // for mixed-case SDK header constants such as "X-TypeSafe-SDK" and "TypeSafe-Danger-Zone-Images".
 var (
@@ -70,6 +72,7 @@ type request struct {
 	compression *bool
 	longContext *bool
 	images      *bool
+	client      *Client
 }
 
 // response is a successful HTTP response together with the metadata the SDK surfaces on its
@@ -90,7 +93,19 @@ type response struct {
 // A non-2xx status is returned as a typed [APIError] so the retry policy can classify it. Read
 // failures and timeouts are returned as [APIConnectionError] or [APITimeoutError].
 func execute(ctx context.Context, config *Config, httpClient *http.Client, req request) (*response, error) {
+	if ctx == nil {
+		return nil, &SDKError{Message: "context must not be nil."}
+	}
+	if req.client != nil && req.client.closed.Load() {
+		return nil, &SDKError{Message: "Client is closed."}
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
 	policy := cmp.Or(req.retryPolicy, config.RetryPolicy)
+	if policy == nil {
+		policy = DefaultRetryPolicy()
+	}
 
 	targetURL := config.BaseURL + req.path
 	safeURL := cleanURL(targetURL)
@@ -135,8 +150,27 @@ func execute(ctx context.Context, config *Config, httpClient *http.Client, req r
 	logger := config.Logger
 
 	var result *response
+	callStart := time.Now()
 	attemptErr := policy.Execute(ctx, func(attempt int) error {
-		attemptCtx, cancel := context.WithTimeout(ctx, req.timeout)
+		if req.client != nil && req.client.closed.Load() {
+			return &SDKError{Message: "Client is closed."}
+		}
+		attemptTimeout := req.timeout
+		reportedTimeout := req.timeout
+		if policy.Timeout != nil {
+			remaining := *policy.Timeout - time.Since(callStart)
+			if remaining <= 0 {
+				return &APITimeoutError{
+					Cause:   context.DeadlineExceeded,
+					Timeout: *policy.Timeout,
+				}
+			}
+			if remaining <= attemptTimeout {
+				attemptTimeout = remaining
+				reportedTimeout = *policy.Timeout
+			}
+		}
+		attemptCtx, cancel := context.WithTimeoutCause(ctx, attemptTimeout, errAttemptTimeout)
 		defer cancel()
 
 		var reader io.Reader
@@ -168,19 +202,33 @@ func execute(ctx context.Context, config *Config, httpClient *http.Client, req r
 			if httpResp != nil && httpResp.Body != nil {
 				closeBody(httpResp.Body)
 			}
-			failure := classifyTransportError(err, req.timeout)
-			logFailure(attemptCtx, logger, req.method, safeURL, failure)
+			if req.client != nil && req.client.closed.Load() {
+				req.client.closeIdlePool()
+				return &SDKError{Message: "Client is closed."}
+			}
+			failure := classifyTransportError(ctx, attemptCtx, err, reportedTimeout)
+			logFailure(ctx, logger, req.method, safeURL, failure)
 			return failure
 		}
 		if httpResp.Body == nil {
 			httpResp.Body = http.NoBody
 		}
+		if req.client != nil {
+			defer func() {
+				if req.client.closed.Load() {
+					req.client.closeIdlePool()
+				}
+			}()
+		}
 		defer closeBody(httpResp.Body)
 
 		payload, err := readResponseBody(httpResp)
 		if err != nil {
-			failure := classifyTransportError(err, req.timeout)
-			logFailure(attemptCtx, logger, req.method, safeURL, failure)
+			if req.client != nil && req.client.closed.Load() {
+				return &SDKError{Message: "Client is closed."}
+			}
+			failure := classifyTransportError(ctx, attemptCtx, err, reportedTimeout)
+			logFailure(ctx, logger, req.method, safeURL, failure)
 			return failure
 		}
 
@@ -188,6 +236,9 @@ func execute(ctx context.Context, config *Config, httpClient *http.Client, req r
 		logResponse(attemptCtx, logger, req.method, safeURL, httpResp.StatusCode, time.Since(started), requestID, httpResp.Header, payload)
 
 		if httpResp.StatusCode < 200 || httpResp.StatusCode >= 300 {
+			if req.client != nil && req.client.closed.Load() {
+				return &SDKError{Message: "Client is closed."}
+			}
 			return newAPIError(httpResp.StatusCode, decodeErrorBody(payload), payload, httpResp.Header, endpoint)
 		}
 		// A custom RoundTripper is not required to populate Response.Request; fall back to the
@@ -330,32 +381,49 @@ func readResponseBody(httpResp *http.Response) ([]byte, error) {
 	return readBody(httpResp.Body)
 }
 
-// classifyTransportError maps a transport failure onto the SDK's timeout and connection errors.
-func classifyTransportError(err error, timeout time.Duration) error {
+func sanitizeURLErrors(err error) (error, bool) {
+	urlErr, ok := errors.AsType[*url.Error](err)
+	if !ok {
+		return err, false
+	}
+	inner, innerTimeout := sanitizeURLErrors(urlErr.Err)
+	sanitized := &url.Error{
+		Op:  urlErr.Op,
+		URL: cleanURL(urlErr.URL),
+		Err: inner,
+	}
+	return sanitized, urlErr.Timeout() || innerTimeout
+}
+
+// classifyTransportError maps a transport failure onto the SDK's timeout and connection errors,
+// distinguishing per-attempt SDK timeouts from caller context cancellation or deadlines.
+func classifyTransportError(ctx, attemptCtx context.Context, err error, timeout time.Duration) error {
 	if timeoutErr, ok := errors.AsType[*APITimeoutError](err); ok {
 		return timeoutErr
-	}
-	if errors.Is(err, context.Canceled) {
-		return err
 	}
 	if sdkErr, ok := errors.AsType[*SDKError](err); ok {
 		return sdkErr
 	}
-	if urlErr, ok := errors.AsType[*url.Error](err); ok {
-		sanitized := &url.Error{
-			Op:  urlErr.Op,
-			URL: cleanURL(urlErr.URL),
-			Err: urlErr.Err,
+	err, isURLTimeout := sanitizeURLErrors(err)
+
+	if ctx != nil && ctx.Err() == nil && attemptCtx != nil && errors.Is(context.Cause(attemptCtx), errAttemptTimeout) {
+		return &APITimeoutError{
+			Cause:   err,
+			Timeout: timeout,
 		}
-		if urlErr.Timeout() {
-			return &APITimeoutError{
-				Cause:   sanitized,
-				Timeout: timeout,
-			}
-		}
-		err = sanitized
 	}
-	if errors.Is(err, context.DeadlineExceeded) {
+	if ctx != nil {
+		if callerErr := ctx.Err(); callerErr != nil {
+			if errors.Is(err, callerErr) {
+				return err
+			}
+			return callerErr
+		}
+	}
+	if errors.Is(err, context.Canceled) {
+		return err
+	}
+	if isURLTimeout || errors.Is(err, context.DeadlineExceeded) {
 		return &APITimeoutError{
 			Cause:   err,
 			Timeout: timeout,

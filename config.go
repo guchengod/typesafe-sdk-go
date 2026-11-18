@@ -40,10 +40,12 @@ type Config struct {
 	// RetryPolicy is the retry policy in effect for every call.
 	RetryPolicy *RetryPolicy
 
-	// HTTPClient is the caller-supplied HTTP client, or nil when the SDK owns its client.
+	// HTTPClient is the caller-supplied HTTP client, or nil when the SDK constructed its own client.
+	// Note that [Client.Close] flushes idle connections and closes non-default io.Closer transports.
 	HTTPClient *http.Client
 
-	// Transport is the caller-supplied transport, or nil when the SDK owns its transport.
+	// Transport is the caller-supplied transport, or nil when the SDK constructed its own transport.
+	// Note that [Client.Close] flushes idle connections and closes non-default io.Closer transports.
 	Transport http.RoundTripper
 
 	// Compression enables automatic request body compression for bodies >= 1 KiB.
@@ -57,6 +59,19 @@ type Config struct {
 	Images bool
 
 	imagesSet bool
+}
+
+// Clone returns a defensive copy of c with independent DefaultHeaders and RetryPolicy.
+func (c *Config) Clone() *Config {
+	if c == nil {
+		return nil
+	}
+	clone := *c
+	if c.DefaultHeaders != nil {
+		clone.DefaultHeaders = c.DefaultHeaders.Clone()
+	}
+	clone.RetryPolicy = c.RetryPolicy.Clone()
+	return &clone
 }
 
 // String formats Config with APIKey and secret headers redacted.
@@ -164,9 +179,11 @@ func WithTimeout(timeout time.Duration) Option {
 	return func(o *configOptions) { o.timeout = new(timeout) }
 }
 
-// WithRetryPolicy sets the retry policy for every call.
+// WithRetryPolicy sets the retry policy for every call. The policy is snapshotted when the option
+// is constructed.
 func WithRetryPolicy(policy *RetryPolicy) Option {
-	return func(o *configOptions) { o.retryPolicy = policy }
+	cloned := policy.Clone()
+	return func(o *configOptions) { o.retryPolicy = cloned.Clone() }
 }
 
 // WithHeader sets a default header sent with every request. Client identification and
@@ -181,24 +198,30 @@ func WithHeader(key, value string) Option {
 }
 
 // WithHeaders sets default headers sent with every request, merging with any set by [WithHeader].
+// The map is snapshotted when the option is constructed.
 func WithHeaders(headers map[string]string) Option {
+	cloned := maps.Clone(headers)
 	return func(o *configOptions) {
 		if o.defaultHeaders == nil {
-			o.defaultHeaders = make(http.Header, len(headers))
+			o.defaultHeaders = make(http.Header, len(cloned))
 		}
-		for key, value := range headers {
+		for key, value := range cloned {
 			o.defaultHeaders.Set(key, value)
 		}
 	}
 }
 
 // WithHTTPClient supplies the http.Client the SDK sends through, together with its transport.
-// Mutually exclusive with [WithTransport].
+// When client.Transport is nil, the SDK executes requests through an internal clone backed by its
+// hardened TLS >= 1.2 transport; set an explicit Transport on client when sharing a connection pool
+// across multiple SDK clients. Calling [Client.Close] flushes idle connections and closes
+// non-default io.Closer transports. Mutually exclusive with [WithTransport].
 func WithHTTPClient(client *http.Client) Option {
 	return func(o *configOptions) { o.httpClient = client }
 }
 
-// WithTransport supplies the http.RoundTripper the SDK sends through. Mutually exclusive with
+// WithTransport supplies the http.RoundTripper the SDK sends through. Calling [Client.Close]
+// flushes idle connections and closes non-default io.Closer transports. Mutually exclusive with
 // [WithHTTPClient].
 func WithTransport(transport http.RoundTripper) Option {
 	return func(o *configOptions) { o.transport = transport }
@@ -231,9 +254,11 @@ func WithCallTimeout(timeout time.Duration) RequestOption {
 	return func(o *requestOptions) { o.timeout = new(timeout) }
 }
 
-// WithCallRetry overrides the retry policy for a single call.
+// WithCallRetry overrides the retry policy for a single call. The policy is snapshotted when the
+// option is constructed.
 func WithCallRetry(policy *RetryPolicy) RequestOption {
-	return func(o *requestOptions) { o.retryPolicy = policy.Clone() }
+	cloned := policy.Clone()
+	return func(o *requestOptions) { o.retryPolicy = cloned.Clone() }
 }
 
 // WithCallHeader sets or overrides a request header for a single call.
@@ -247,13 +272,14 @@ func WithCallHeader(key, value string) RequestOption {
 }
 
 // WithCallHeaders sets or overrides request headers for a single call, merging with any set by
-// [WithCallHeader].
+// [WithCallHeader]. The map is snapshotted when the option is constructed.
 func WithCallHeaders(headers map[string]string) RequestOption {
+	cloned := maps.Clone(headers)
 	return func(o *requestOptions) {
 		if o.extraHeaders == nil {
-			o.extraHeaders = make(map[string]string, len(headers))
+			o.extraHeaders = make(map[string]string, len(cloned))
 		}
-		maps.Copy(o.extraHeaders, headers)
+		maps.Copy(o.extraHeaders, cloned)
 	}
 }
 
@@ -279,32 +305,36 @@ func WithCallImages(enabled bool) RequestOption {
 }
 
 // WithAssets attaches an assets map to the request, containing image assets.
-// It accepts [Assets], map[string]Asset, or map[string]any.
+// It accepts [Assets], map[string]Asset, or map[string]any, snapshotting the map when constructed.
 func WithAssets(assets any) RequestOption {
-	return func(o *requestOptions) {
-		o.assetsErr = nil
-		switch typed := assets.(type) {
-		case nil:
-			o.assets = nil
-		case Assets:
-			m := make(map[string]any, len(typed))
-			for k, v := range typed {
-				m[k] = v
-			}
-			o.assets = m
-		case map[string]Asset:
-			m := make(map[string]any, len(typed))
-			for k, v := range typed {
-				m[k] = v
-			}
-			o.assets = m
-		case map[string]any:
-			o.assets = maps.Clone(typed)
-		default:
-			o.assetsErr = &SDKError{
-				Message: fmt.Sprintf("Assets must be Assets, map[string]Asset, or map[string]any, not %T.", assets),
-			}
+	var snapshot map[string]any
+	var snapshotErr error
+	switch typed := assets.(type) {
+	case nil:
+	case Assets:
+		snapshot = make(map[string]any, len(typed))
+		for k, v := range typed {
+			snapshot[k] = v
 		}
+	case map[string]Asset:
+		snapshot = make(map[string]any, len(typed))
+		for k, v := range typed {
+			snapshot[k] = v
+		}
+	case map[string]any:
+		snapshot = maps.Clone(typed)
+	default:
+		snapshotErr = &SDKError{
+			Message: fmt.Sprintf("Assets must be Assets, map[string]Asset, or map[string]any, not %T.", assets),
+		}
+	}
+	return func(o *requestOptions) {
+		o.assetsErr = snapshotErr
+		if snapshotErr != nil || snapshot == nil {
+			o.assets = nil
+			return
+		}
+		o.assets = maps.Clone(snapshot)
 	}
 }
 
@@ -312,8 +342,19 @@ func WithAssets(assets any) RequestOption {
 // "questions", and "assets" after they are set. Merging is last-write-wins: a colliding key
 // replaces the SDK's value, and object values are replaced rather than deep-merged. Images are
 // collected from the final "state" and "questions", so an override is reflected in the assets.
+// The map is snapshotted when the option is constructed.
 func WithExtraBody(extra map[string]any) RequestOption {
-	return func(o *requestOptions) { o.extraBody = extra }
+	cloned := maps.Clone(extra)
+	return func(o *requestOptions) {
+		if cloned == nil {
+			o.extraBody = nil
+			return
+		}
+		if o.extraBody == nil {
+			o.extraBody = make(map[string]any, len(cloned))
+		}
+		maps.Copy(o.extraBody, cloned)
+	}
 }
 
 // resolveEnv returns the first non-blank value among the explicit value, the named environment

@@ -32,6 +32,10 @@ type Asset struct {
 type Assets map[string]Asset
 
 // Image represents an image asset that can be referenced in state, instructions, or criteria.
+//
+// An Image constructed via [NewImage], [NewImageWithRef], [NewImageFromFile], or [NewImageFromRoot]
+// is safe to share concurrently across goroutines as long as its exported fields are treated as
+// immutable after construction.
 type Image struct {
 	// Ref is the unique reference string used to refer to this image.
 	Ref string

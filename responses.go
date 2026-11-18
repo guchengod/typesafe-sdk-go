@@ -2,6 +2,7 @@ package typesafe
 
 import (
 	"bytes"
+	"context"
 	"encoding/json/jsontext"
 	jsonv2 "encoding/json/v2"
 	"errors"
@@ -259,33 +260,63 @@ type SystemOneResponse struct {
 	rawBody     []byte
 }
 
-// Nouls returns the yes/no answers keyed by question name.
-func (r *SystemOneResponse) Nouls() map[string]*NoulAnswer { return r.nouls }
+// Nouls returns the yes/no answers keyed by question name. Treat the returned map and answer
+// pointers as read-only when sharing a SystemOneResponse across goroutines.
+func (r *SystemOneResponse) Nouls() map[string]*NoulAnswer {
+	if r == nil {
+		return nil
+	}
+	return r.nouls
+}
 
-// Choices returns the choice answers keyed by question name.
-func (r *SystemOneResponse) Choices() map[string]*ChoiceAnswer { return r.choices }
+// Choices returns the choice answers keyed by question name. Treat the returned map and answer
+// pointers as read-only when sharing a SystemOneResponse across goroutines.
+func (r *SystemOneResponse) Choices() map[string]*ChoiceAnswer {
+	if r == nil {
+		return nil
+	}
+	return r.choices
+}
 
-// Scores returns the score answers keyed by question name.
-func (r *SystemOneResponse) Scores() map[string]*ScoreAnswer { return r.scores }
+// Scores returns the score answers keyed by question name. Treat the returned map and answer
+// pointers as read-only when sharing a SystemOneResponse across goroutines.
+func (r *SystemOneResponse) Scores() map[string]*ScoreAnswer {
+	if r == nil {
+		return nil
+	}
+	return r.scores
+}
 
-// Boxes returns the box answers keyed by question name.
-func (r *SystemOneResponse) Boxes() map[string]*BoxAnswer { return r.boxes }
+// Boxes returns the box answers keyed by question name. Treat the returned map and answer
+// pointers as read-only when sharing a SystemOneResponse across goroutines.
+func (r *SystemOneResponse) Boxes() map[string]*BoxAnswer {
+	if r == nil {
+		return nil
+	}
+	return r.boxes
+}
 
 // RequestID returns the x-typesafe-request-id response header. It reports an error when the
 // response did not carry one.
 func (r *SystemOneResponse) RequestID() (string, error) {
-	if r.requestID == "" {
+	if r == nil || r.requestID == "" {
 		return "", &SDKError{Message: "The response did not include a request ID."}
 	}
 	return r.requestID, nil
 }
 
 // RawRequestID returns the request ID, or the empty string when absent.
-func (r *SystemOneResponse) RawRequestID() string { return r.requestID }
+func (r *SystemOneResponse) RawRequestID() string {
+	if r == nil {
+		return ""
+	}
+	return r.requestID
+}
 
-// RawHTTPResponse returns the underlying *http.Response.
+// RawHTTPResponse returns the underlying *http.Response. Treat the returned response and headers as
+// read-only when sharing a SystemOneResponse across goroutines.
 func (r *SystemOneResponse) RawHTTPResponse() (*http.Response, error) {
-	if r.rawResponse == nil {
+	if r == nil || r.rawResponse == nil {
 		return nil, &SDKError{Message: "The response was not created from a raw HTTP response."}
 	}
 	return r.rawResponse, nil
@@ -338,18 +369,24 @@ type ListModelsResponse struct {
 // RequestID returns the x-typesafe-request-id response header. It reports an error when the
 // response did not carry one.
 func (r *ListModelsResponse) RequestID() (string, error) {
-	if r.requestID == "" {
+	if r == nil || r.requestID == "" {
 		return "", &SDKError{Message: "The response did not include a request ID."}
 	}
 	return r.requestID, nil
 }
 
 // RawRequestID returns the request ID, or the empty string when absent.
-func (r *ListModelsResponse) RawRequestID() string { return r.requestID }
+func (r *ListModelsResponse) RawRequestID() string {
+	if r == nil {
+		return ""
+	}
+	return r.requestID
+}
 
-// RawHTTPResponse returns the underlying *http.Response.
+// RawHTTPResponse returns the underlying *http.Response. Treat the returned response and headers as
+// read-only when sharing a ListModelsResponse across goroutines.
 func (r *ListModelsResponse) RawHTTPResponse() (*http.Response, error) {
-	if r.rawResponse == nil {
+	if r == nil || r.rawResponse == nil {
 		return nil, &SDKError{Message: "The response was not created from a raw HTTP response."}
 	}
 	return r.rawResponse, nil
@@ -628,6 +665,10 @@ func decodeText(raw jsontext.Value) (string, bool) {
 // does not model is skipped with a warning, leaving the full payload available through
 // [SystemOneResponse.RawBody].
 func parseSystemOneResponse(resp *response, questions []string, logger *slog.Logger) (*SystemOneResponse, error) {
+	return parseSystemOneResponseWithContext(context.Background(), resp, questions, logger)
+}
+
+func parseSystemOneResponseWithContext(ctx context.Context, resp *response, questions []string, logger *slog.Logger) (*SystemOneResponse, error) {
 	d := newDecoder(resp)
 	if err := openInto(d, &d.envelope); err != nil {
 		return nil, err
@@ -653,7 +694,7 @@ func parseSystemOneResponse(resp *response, questions []string, logger *slog.Log
 		// the API answers all of them.
 		return nil, d.invalid("answers")
 	}
-	if err := parseAnswers(d.envelope.Answers, questions, result, d, logger); err != nil {
+	if err := parseAnswers(ctx, d.envelope.Answers, questions, result, d, logger); err != nil {
 		return nil, err
 	}
 	return result, nil
@@ -662,7 +703,7 @@ func parseSystemOneResponse(resp *response, questions []string, logger *slog.Log
 // parseAnswers decodes the answers object into typed answers plus the grouped accessors. Every
 // requested question must be present; the check runs before any answer is decoded, so a missing
 // answer is reported even when a later entry is malformed.
-func parseAnswers(raw jsontext.Value, questions []string, result *SystemOneResponse, d *decoder, logger *slog.Logger) error {
+func parseAnswers(ctx context.Context, raw jsontext.Value, questions []string, result *SystemOneResponse, d *decoder, logger *slog.Logger) error {
 	entries, ok := objectEntries(raw)
 	if !ok {
 		return d.invalid("answers")
@@ -698,11 +739,12 @@ func parseAnswers(raw jsontext.Value, questions []string, result *SystemOneRespo
 			result.Answers[name], result.boxes[name] = typed, typed
 		}
 	}
-	if skippedCount > 0 && logger != nil {
+	if skippedCount > 0 && logger != nil && logger.Enabled(ctx, slog.LevelWarn) {
 		if skippedCount == 1 {
-			logger.Warn("Ignoring an answer with an unrecognized type", slog.String("name", firstSkippedName))
+			logger.LogAttrs(ctx, slog.LevelWarn, "Ignoring an answer with an unrecognized type",
+				slog.String("name", firstSkippedName))
 		} else {
-			logger.Warn("Ignoring an answer with an unrecognized type",
+			logger.LogAttrs(ctx, slog.LevelWarn, "Ignoring an answer with an unrecognized type",
 				slog.String("name", firstSkippedName),
 				slog.Int("skipped_count", skippedCount),
 			)

@@ -2,6 +2,7 @@ package main
 
 import (
 	"bytes"
+	"context"
 	jsonv2 "encoding/json/v2"
 	"fmt"
 	"io"
@@ -9,13 +10,70 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime"
+	"runtime/pprof"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	typesafe "github.com/guchengod/typesafe-sdk-go"
 )
+
+func TestMain(m *testing.M) {
+	code := m.Run()
+	if code == 0 {
+		if err := verifyNoCLIGoroutineLeaks(); err != nil {
+			fmt.Fprintf(os.Stderr, "CLI goroutine leak detected:\n%v\n", err)
+			code = 1
+		}
+	}
+	os.Exit(code)
+}
+
+func verifyNoCLIGoroutineLeaks() error {
+	for range 4 {
+		runtime.Gosched()
+	}
+	if leakProf := pprof.Lookup("goroutineleak"); leakProf != nil {
+		var leakBuf bytes.Buffer
+		if err := leakProf.WriteTo(&leakBuf, 1); err != nil {
+			return fmt.Errorf("writing goroutineleak profile: %w", err)
+		}
+		if leakProf.Count() > 0 {
+			return fmt.Errorf("goroutineleak count=%d:\n%s", leakProf.Count(), leakBuf.String())
+		}
+	}
+	deadline := time.Now().Add(500 * time.Millisecond)
+	for {
+		var stackBuf bytes.Buffer
+		if prof := pprof.Lookup("goroutine"); prof != nil {
+			_ = prof.WriteTo(&stackBuf, 2)
+		}
+		var bad []string
+		for block := range strings.SplitSeq(strings.TrimSpace(stackBuf.String()), "\n\n") {
+			if block == "" ||
+				strings.Contains(block, "runtime/pprof.writeGoroutine") ||
+				strings.Contains(block, "testing.(*M).Run") ||
+				strings.Contains(block, "testing.(*T).Parallel") {
+				continue
+			}
+			if strings.Contains(block, "github.com/guchengod/typesafe-sdk-go") ||
+				strings.Contains(block, "net/http.(*persistConn).") ||
+				strings.Contains(block, "os/signal.NotifyContext") {
+				bad = append(bad, block)
+			}
+		}
+		if len(bad) == 0 {
+			return nil
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("lingering goroutines:\n%s", strings.Join(bad, "\n\n"))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
 
 var (
 	testRouterMu sync.Mutex
@@ -26,6 +84,9 @@ var (
 type memoryTransport struct{}
 
 func (m *memoryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if req.Body != nil {
+		defer func() { _ = req.Body.Close() }()
+	}
 	testRouterMu.Lock()
 	handler := testRoutes[req.URL.Host]
 	testRouterMu.Unlock()
@@ -47,11 +108,11 @@ func (m *memoryTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	return rec.Result(), nil
 }
 
-func init() {
-	clientOptions = []typesafe.Option{
+func runTest(ctx context.Context, args []string, stdout, stderr io.Writer, stdin io.Reader) int {
+	return runWithOptions(ctx, args, stdout, stderr, stdin,
 		typesafe.WithTransport(&memoryTransport{}),
 		typesafe.WithAllowInsecureHTTP(true),
-	}
+	)
 }
 
 // cliResult is what one CLI invocation produced.
@@ -69,6 +130,7 @@ func (s *cliAPIServer) Close() {}
 
 // cliAPI is a stub API the CLI talks to.
 type cliAPI struct {
+	mu     sync.Mutex
 	server *cliAPIServer
 	// requests records the decoded body of every request the CLI sent.
 	requests []map[string]any
@@ -87,15 +149,22 @@ func newCLIAPI(t *testing.T, respond func(w http.ResponseWriter, r *http.Request
 		respond: respond,
 	}
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var decoded map[string]any
+		var hasBody bool
 		if r.Body != nil {
 			body, _ := io.ReadAll(r.Body)
 			if len(body) > 0 {
-				var decoded map[string]any
 				_ = jsonv2.Unmarshal(body, &decoded)
-				api.requests = append(api.requests, decoded)
+				hasBody = true
 			}
 		}
-		api.headers = append(api.headers, r.Header.Clone())
+		hdr := r.Header.Clone()
+		api.mu.Lock()
+		if hasBody {
+			api.requests = append(api.requests, decoded)
+		}
+		api.headers = append(api.headers, hdr)
+		api.mu.Unlock()
 		api.respond(w, r)
 	})
 
@@ -117,7 +186,7 @@ func runCLI(t *testing.T, api *cliAPI, stdin string, args ...string) cliResult {
 	full := append([]string{"--api-key", "test-key", "--base-url", api.server.URL}, args...)
 
 	var stdout, stderr bytes.Buffer
-	code := run(t.Context(), full, &stdout, &stderr, strings.NewReader(stdin))
+	code := runTest(t.Context(), full, &stdout, &stderr, strings.NewReader(stdin))
 	return cliResult{code: code, stdout: stdout.String(), stderr: stderr.String()}
 }
 
@@ -394,23 +463,22 @@ func TestAskAPIErrorExitCode(t *testing.T) {
 }
 
 func TestAskConnectionErrorExitCode(t *testing.T) {
+	t.Parallel()
+
 	// An in-memory test server that aborts the connection mid-flight: exercises NewTestServer's
 	// fake network transport without binding an OS socket or waiting on a dial timeout.
 	server := httptest.NewTestServer(t, http.HandlerFunc(func(http.ResponseWriter, *http.Request) {
 		panic(http.ErrAbortHandler)
 	}))
 	client := server.Client()
-	saved := clientOptions
-	clientOptions = []typesafe.Option{
-		typesafe.WithTransport(client.Transport),
-		typesafe.WithAllowInsecureHTTP(true),
-	}
-	t.Cleanup(func() { clientOptions = saved })
 
 	var stdout, stderr bytes.Buffer
-	code := run(t.Context(),
+	code := runWithOptions(t.Context(),
 		[]string{"ask", "--api-key", "k", "--base-url", server.URL, "--state", "x", "--noul", "q=Is this spam?", "--retries", "0"},
-		&stdout, &stderr, strings.NewReader(""))
+		&stdout, &stderr, strings.NewReader(""),
+		typesafe.WithTransport(client.Transport),
+		typesafe.WithAllowInsecureHTTP(true),
+	)
 
 	if code != exitConnection {
 		t.Errorf("exit code = %d, want %d (stderr=%s)", code, exitConnection, stderr.String())
@@ -483,7 +551,7 @@ func TestEnvConfiguration(t *testing.T) {
 	t.Setenv("TYPESAFE_BASE_URL", api.server.URL)
 
 	var stdout, stderr bytes.Buffer
-	code := run(t.Context(),
+	code := runTest(t.Context(),
 		[]string{"ask", "--state", "hello", "--questions", "@" + questionFile},
 		&stdout, &stderr, strings.NewReader(""))
 
@@ -515,7 +583,7 @@ func TestGlobalFlagsBeforeTheCommand(t *testing.T) {
 	api := newCLIAPI(t, respondJSON(cliAnswerPayload, http.StatusOK))
 
 	var stdout, stderr bytes.Buffer
-	code := run(t.Context(),
+	code := runTest(t.Context(),
 		[]string{"--api-key", "before-key", "--base-url", api.server.URL, "ask", "--state", "hello", "--noul", "billing=?"},
 		&stdout, &stderr, strings.NewReader(""))
 
@@ -533,7 +601,7 @@ func TestCommandFlagsWinOverGlobalFlags(t *testing.T) {
 	second := newCLIAPI(t, respondJSON(modelsPayload, http.StatusOK))
 
 	var stdout, stderr bytes.Buffer
-	code := run(t.Context(),
+	code := runTest(t.Context(),
 		[]string{"--api-key", "k", "--base-url", first.server.URL, "models", "--base-url", second.server.URL},
 		&stdout, &stderr, strings.NewReader(""))
 
@@ -661,7 +729,7 @@ func TestCLISecurityHardeningFlagsAndSanitization(t *testing.T) {
 		t.Fatal(err)
 	}
 	var outBuf, errBuf bytes.Buffer
-	code := run(t.Context(), []string{
+	code := runTest(t.Context(), []string{
 		"--api-key-file", keyFile,
 		"--base-url", api.server.URL,
 		"ask",
@@ -709,5 +777,42 @@ func TestCLISecurityHardeningFlagsAndSanitization(t *testing.T) {
 	var nilList *stringList
 	if got := nilList.String(); got != "" {
 		t.Errorf("(*stringList)(nil).String() = %q, want empty", got)
+	}
+}
+
+func TestAskCancelledContextUnblocksStdinPipe(t *testing.T) {
+	t.Parallel()
+
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("os.Pipe() error = %v", err)
+	}
+	t.Cleanup(func() {
+		_ = writer.Close()
+		_ = reader.Close()
+	})
+
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan int, 1)
+	var stdout, stderr bytes.Buffer
+
+	go func() {
+		done <- run(ctx,
+			[]string{"ask", "--api-key", "k", "--state", "-", "--noul", "q=Is this spam?"},
+			&stdout, &stderr, reader)
+	}()
+
+	time.Sleep(15 * time.Millisecond)
+	cancel()
+
+	select {
+	case code := <-done:
+		if code != exitConnection {
+			t.Fatalf("exit code = %d, want %d (stderr=%s)", code, exitConnection, stderr.String())
+		}
+	case <-time.After(500 * time.Millisecond):
+		_ = writer.Close() // unblock cleanup so test binary can finish
+		<-done
+		t.Fatal("run() stayed blocked on stdin after ctx cancellation")
 	}
 }

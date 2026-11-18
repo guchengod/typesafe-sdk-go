@@ -40,12 +40,10 @@ const benchCLIResponse = `{
 // BenchmarkRunAsk measures end-to-end CLI flag parsing, state decoding, SDK dispatch, and output
 // formatting for both JSON and human-readable text modes.
 func BenchmarkRunAsk(b *testing.B) {
-	saved := clientOptions
-	clientOptions = []typesafe.Option{
+	extraOpts := []typesafe.Option{
 		typesafe.WithTransport(benchCLITransport{body: benchCLIResponse}),
 		typesafe.WithRetryPolicy(&typesafe.RetryPolicy{MaxRetries: 0}),
 	}
-	b.Cleanup(func() { clientOptions = saved })
 
 	baseArgs := []string{
 		"ask",
@@ -62,9 +60,9 @@ func BenchmarkRunAsk(b *testing.B) {
 			ctx := b.Context()
 			b.ReportAllocs()
 			for b.Loop() {
-				code := run(ctx, args, io.Discard, io.Discard, strings.NewReader(""))
+				code := runWithOptions(ctx, args, io.Discard, io.Discard, strings.NewReader(""), extraOpts...)
 				if code != exitOK {
-					b.Fatalf("run(format=%s) exit code = %d, want %d", format, code, exitOK)
+					b.Fatalf("runWithOptions(format=%s) exit code = %d, want %d", format, code, exitOK)
 				}
 				benchCLISinkCode = code
 			}

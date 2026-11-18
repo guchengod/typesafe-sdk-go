@@ -262,17 +262,21 @@ const loggingTestProbe = "logging-test-probe"
 // loggingTestLogLevels are the levels the default logger tests exercise.
 var loggingTestLogLevels = []slog.Level{slog.LevelDebug, slog.LevelInfo, slog.LevelWarn, slog.LevelError}
 
+var stderrCaptureMu sync.Mutex
+
 // loggingTestCaptureStderr runs fn with os.Stderr replaced by a pipe and returns what fn wrote to
 // it, so the default logger's output is observed rather than inferred.
 func loggingTestCaptureStderr(t *testing.T, fn func()) string {
 	t.Helper()
+	stderrCaptureMu.Lock()
+	defer stderrCaptureMu.Unlock()
+
 	reader, writer, err := os.Pipe()
 	if err != nil {
 		t.Fatalf("os.Pipe() error = %v", err)
 	}
 	original := os.Stderr
 	os.Stderr = writer
-	defer func() { os.Stderr = original }()
 
 	var buffer bytes.Buffer
 	var wg sync.WaitGroup
@@ -280,15 +284,26 @@ func loggingTestCaptureStderr(t *testing.T, fn func()) string {
 		_, _ = io.Copy(&buffer, reader)
 	})
 
+	var closeWriterOnce sync.Once
+	closeWriter := func() {
+		os.Stderr = original
+		closeWriterOnce.Do(func() {
+			if err := writer.Close(); err != nil {
+				t.Errorf("closing the captured stderr: %v", err)
+			}
+		})
+	}
+	defer func() {
+		closeWriter()
+		wg.Wait()
+		_ = reader.Close()
+	}()
+
 	fn()
 
-	if err := writer.Close(); err != nil {
-		t.Errorf("closing the captured stderr: %v", err)
-	}
+	closeWriter()
 	wg.Wait()
-	output := buffer.String()
-	_ = reader.Close()
-	return output
+	return buffer.String()
 }
 
 func TestDefaultLoggerIsSilentWithoutConfiguration(t *testing.T) {
@@ -628,8 +643,8 @@ func TestLogResponseSeparatesInfoFromDebugWireAndSanitizesURLs(t *testing.T) {
 	}
 	t.Cleanup(func() { _ = client.Close() })
 
-	// Inject credentials/query on internal Config.BaseURL to verify defense-in-depth URL scrubbing in logs.
-	client.Config().BaseURL = "https://svc:url-pass@example.test/prefix?api_token=url-tok"
+	// Inject credentials/query on internal config.BaseURL to verify defense-in-depth URL scrubbing in logs.
+	client.config.BaseURL = "https://svc:url-pass@example.test/prefix?api_token=url-tok"
 
 	if _, err := client.SystemOne(t.Context(), hugeState, fixedQuestions()); err != nil {
 		t.Fatalf("SystemOne() error = %v", err)

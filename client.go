@@ -2,28 +2,32 @@ package typesafe
 
 import (
 	"cmp"
+	"context"
 	"io"
 	"net/http"
 	"net/url"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 )
 
 // Client is the TypeSafe AI API client.
 //
 // A Client is safe for concurrent use by multiple goroutines: it holds no per-request state, and
-// the underlying http.Client pools connections across calls. Create one Client and share it. All
-// request methods take a context.Context, which is the only cancellation and concurrency control
-// the SDK needs.
+// the underlying http.Client pools connections across calls. Create one Client, share it across
+// goroutines, and call [Client.Close] once all in-flight calls have completed. All request methods
+// take a non-nil context.Context for cancellation and deadlines.
 type Client struct {
-	config     *Config
-	httpClient *http.Client
-	execClient *http.Client
+	config       *Config
+	publicConfig *Config
+	httpClient   *http.Client
+	execClient   *http.Client
 
 	// Models provides access to the Models API resource.
 	Models *ModelsService
 
+	closed    atomic.Bool
 	closeOnce sync.Once
 	closeErr  error
 }
@@ -44,9 +48,10 @@ func NewClient(opts ...Option) (*Client, error) {
 
 	httpClient, execClient := buildExecHTTPClient(config)
 	client := &Client{
-		config:     config,
-		httpClient: httpClient,
-		execClient: execClient,
+		config:       config,
+		publicConfig: config.Clone(),
+		httpClient:   httpClient,
+		execClient:   execClient,
 	}
 	client.Models = &ModelsService{client: client}
 	return client, nil
@@ -110,16 +115,20 @@ func sameOrigin(a, b *url.URL) bool {
 }
 
 // Config returns the resolved client configuration. Treat the returned Config as read-only once
-// the Client is shared across goroutines; use per-call [RequestOption] values for overrides.
+// the Client is shared across goroutines; mutating it does not affect in-flight or future calls,
+// which execute against an isolated internal snapshot. Use [Config.Clone] for an independent copy
+// or per-call [RequestOption] values for overrides.
 func (c *Client) Config() *Config {
 	if c == nil {
 		return nil
 	}
-	return c.config
+	return cmp.Or(c.publicConfig, c.config)
 }
 
 // HTTPClient returns the underlying *http.Client. A client constructed with [WithHTTPClient]
-// returns that value; otherwise it returns the SDK's own client.
+// returns that value; otherwise it returns the SDK's own client. When a client supplied via
+// [WithHTTPClient] has a nil Transport, requests execute through an internal clone backed by the
+// SDK's hardened TLS >= 1.2 transport.
 func (c *Client) HTTPClient() *http.Client {
 	if c == nil {
 		return nil
@@ -127,18 +136,21 @@ func (c *Client) HTTPClient() *http.Client {
 	return c.httpClient
 }
 
-// Close releases the connection pool held by the client's transport.
+// Close releases the connection pool held by the client's transport and marks the client closed so
+// subsequent calls fail immediately with an [SDKError].
 //
 // A transport supplied through [WithTransport] or [WithHTTPClient] is closed when it implements
-// io.Closer, so the client owns the resources it was given. Close is idempotent: later calls
-// return the first call's error without touching the transport again.
+// io.Closer (except [http.DefaultTransport], which is never closed), so callers sharing a custom
+// transport across multiple clients should close only after all sharing clients are finished.
+// Close is idempotent: later calls return the first call's error without touching the transport again.
 func (c *Client) Close() error {
 	if c == nil {
 		return nil
 	}
 	c.closeOnce.Do(func() {
+		c.closed.Store(true)
 		active := cmp.Or(c.execClient, c.httpClient)
-		if active == nil || active.Transport == nil {
+		if active == nil || active.Transport == nil || active.Transport == http.DefaultTransport {
 			return
 		}
 		if idle, ok := active.Transport.(interface{ CloseIdleConnections() }); ok {
@@ -151,8 +163,40 @@ func (c *Client) Close() error {
 	return c.closeErr
 }
 
+func (c *Client) closeIdlePool() {
+	if c == nil {
+		return
+	}
+	active := cmp.Or(c.execClient, c.httpClient)
+	if active == nil || active.Transport == nil || active.Transport == http.DefaultTransport {
+		return
+	}
+	if idle, ok := active.Transport.(interface{ CloseIdleConnections() }); ok {
+		idle.CloseIdleConnections()
+	}
+}
+
+func (c *Client) checkOpen(ctx context.Context) error {
+	if c == nil || c.config == nil {
+		return &SDKError{Message: "Client is not initialized; construct one with NewClient."}
+	}
+	if ctx == nil {
+		return &SDKError{Message: "context must not be nil."}
+	}
+	if c.closed.Load() {
+		return &SDKError{Message: "Client is closed."}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	return nil
+}
+
 // newRequest folds the per-call options into an executable request against the client's config.
 func (c *Client) newRequest(method, path string, body any, options requestOptions) (request, error) {
+	if c.closed.Load() {
+		return request{}, &SDKError{Message: "Client is closed."}
+	}
 	if options.assetsErr != nil {
 		return request{}, options.assetsErr
 	}
@@ -175,6 +219,7 @@ func (c *Client) newRequest(method, path string, body any, options requestOption
 		compression: options.compression,
 		longContext: options.longContext,
 		images:      options.images,
+		client:      c,
 	}, nil
 }
 

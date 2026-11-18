@@ -184,13 +184,18 @@ func redactHeaders(headers map[string][]string) map[string]string {
 // RedactingHandler wraps an [slog.Handler] and redacts credential-bearing attributes before they
 // reach it.
 //
+// RedactingHandler is stateless and safe for concurrent use by multiple goroutines when wrapping a
+// concurrency-safe [slog.Handler], provided callers do not concurrently mutate maps or slices passed
+// in log attributes during [RedactingHandler.Handle].
+//
 // The SDK already redacts the headers it logs itself; this handler extends that guarantee to
 // records the caller routes through the SDK's logger:
 //
 //	logger := slog.New(typesafe.NewRedactingHandler(slog.NewJSONHandler(os.Stdout, nil)))
 //	client, err := typesafe.NewClient(typesafe.WithLogger(logger))
 //
-// Values held in a map[string]string under any attribute are inspected key by key.
+// Nested [slog.Group] attributes, [slog.LogValuer] results, [http.Header], map[string]string,
+// map[string][]string, map[string]any, and []any values are inspected recursively.
 type RedactingHandler struct {
 	handler slog.Handler
 }

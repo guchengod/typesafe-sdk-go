@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"maps"
 	"reflect"
+	"slices"
 	"strings"
 )
 
@@ -197,7 +198,7 @@ func NewChoice(criteria map[string]any, opts ...QuestionOption) *ChoiceQuestion 
 	options := resolveQuestionOptions(opts)
 	return &ChoiceQuestion{
 		Type:         "choice",
-		Criteria:     criteria,
+		Criteria:     maps.Clone(criteria),
 		Instructions: resolveInstructions(nil, options),
 		extra:        options.extra,
 	}
@@ -268,7 +269,7 @@ func NewScore(criteria []any, opts ...QuestionOption) *ScoreQuestion {
 	options := resolveQuestionOptions(opts)
 	return &ScoreQuestion{
 		Type:         "score",
-		Criteria:     criteria,
+		Criteria:     slices.Clone(criteria),
 		Instructions: resolveInstructions(nil, options),
 		extra:        options.extra,
 	}
@@ -456,13 +457,21 @@ func isInvalidScoreCriteria(criteria any) bool {
 	}
 }
 
-// NormalizeQuestions validates the questions before they are encoded and returns the map that is
-// sent on the wire.
+// NormalizeQuestions validates the questions before they are encoded and returns a newly allocated
+// map suitable to send on the wire.
 //
 // It accepts [Questions], map[string]Question, map[string]*NoulQuestion and the sibling maps,
 // map[string]any, and [RawQuestion] values.
 func NormalizeQuestions(questions any) (map[string]any, error) {
-	entries, err := questionEntries(questions)
+	return normalizeQuestions(questions, true)
+}
+
+func normalizeQuestionsReadOnly(questions any) (map[string]any, error) {
+	return normalizeQuestions(questions, false)
+}
+
+func normalizeQuestions(questions any, cloneRawMaps bool) (map[string]any, error) {
+	entries, err := questionEntries(questions, cloneRawMaps)
 	if err != nil {
 		return nil, err
 	}
@@ -478,7 +487,7 @@ func NormalizeQuestions(questions any) (map[string]any, error) {
 }
 
 // questionEntries converts the accepted question container forms into a plain map.
-func questionEntries(questions any) (map[string]any, error) {
+func questionEntries(questions any, cloneRawMaps bool) (map[string]any, error) {
 	switch typed := questions.(type) {
 	case nil:
 		return nil, &SDKError{Message: "At least one question is required."}
@@ -487,8 +496,14 @@ func questionEntries(questions any) (map[string]any, error) {
 	case RawQuestion:
 		// A RawQuestion is a named map[string]any, so accept it as a container the same way
 		// Questions is accepted.
+		if cloneRawMaps {
+			return maps.Clone(map[string]any(typed)), nil
+		}
 		return map[string]any(typed), nil
 	case map[string]any:
+		if cloneRawMaps {
+			return maps.Clone(typed), nil
+		}
 		return typed, nil
 	case map[string]Question:
 		return toStringKeyedMap(typed), nil

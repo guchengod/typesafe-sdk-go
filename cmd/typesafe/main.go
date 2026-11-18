@@ -45,10 +45,14 @@ const (
 )
 
 func main() {
-	// Ctrl-C cancels the in-flight request instead of leaving it to time out.
+	// Ctrl-C cancels the in-flight operation; AfterFunc immediately restores default OS signal
+	// disposition on the first signal so a second Ctrl-C force-exits if teardown stalls.
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
-	defer stop()
-	os.Exit(run(ctx, os.Args[1:], os.Stdout, os.Stderr, os.Stdin))
+	unhook := context.AfterFunc(ctx, stop)
+	code := run(ctx, os.Args[1:], os.Stdout, os.Stderr, os.Stdin)
+	unhook()
+	stop()
+	os.Exit(code)
 }
 
 // run dispatches a command and returns the process exit code.
@@ -57,6 +61,10 @@ func main() {
 // both "typesafe --api-key k models" and "typesafe models --api-key k" work.
 // Flags given to the command win over the ones given before it.
 func run(ctx context.Context, args []string, stdout, stderr io.Writer, stdin io.Reader) int {
+	return runWithOptions(ctx, args, stdout, stderr, stdin)
+}
+
+func runWithOptions(ctx context.Context, args []string, stdout, stderr io.Writer, stdin io.Reader, extraOpts ...typesafe.Option) int {
 	inherited := &connectionFlags{}
 	root := flag.NewFlagSet("typesafe", flag.ContinueOnError)
 	root.SetOutput(stderr)
@@ -86,9 +94,9 @@ func run(ctx context.Context, args []string, stdout, stderr io.Writer, stdin io.
 
 	switch rest[0] {
 	case "ask":
-		return runAsk(ctx, rest[1:], stdout, stderr, stdin, *inherited)
+		return runAsk(ctx, rest[1:], stdout, stderr, stdin, *inherited, extraOpts)
 	case "models":
-		return runModels(ctx, rest[1:], stdout, stderr, *inherited)
+		return runModels(ctx, rest[1:], stdout, stderr, *inherited, extraOpts)
 	case "version", "--version", "-v":
 		writef(stdout, "typesafe %s (%s)\n", typesafe.SDKVersion, typesafe.RuntimeString())
 		return exitOK
@@ -244,11 +252,8 @@ func changedFlags(fs *flag.FlagSet) map[string]bool {
 	return changed
 }
 
-// clientOptions allows injecting client options (such as mock transports for tests).
-var clientOptions []typesafe.Option
-
 // options turns the flags into SDK client options.
-func (c *connectionFlags) options(stderr io.Writer) ([]typesafe.Option, error) {
+func (c *connectionFlags) options(stderr io.Writer, extraOpts []typesafe.Option) ([]typesafe.Option, error) {
 	if c.conflictKeyFlags {
 		return nil, errors.New("--api-key and --api-key-file are mutually exclusive")
 	}
@@ -257,7 +262,7 @@ func (c *connectionFlags) options(stderr io.Writer) ([]typesafe.Option, error) {
 	}
 	var options []typesafe.Option
 	if c.apiKeyFile != "" {
-		rawKey, err := readRegularFileBounded(c.apiKeyFile, maxAPIKeyFileBytes)
+		rawKey, err := readRegularFileBounded(context.Background(), c.apiKeyFile, maxAPIKeyFileBytes)
 		if err != nil {
 			return nil, fmt.Errorf("reading --api-key-file: %w", err)
 		}
@@ -286,15 +291,15 @@ func (c *connectionFlags) options(stderr io.Writer) ([]typesafe.Option, error) {
 	if c.verbose {
 		options = append(options, typesafe.WithLogger(slogDebug(stderr)))
 	}
-	if len(clientOptions) > 0 {
-		options = append(options, clientOptions...)
+	if len(extraOpts) > 0 {
+		options = append(options, extraOpts...)
 	}
 	return options, nil
 }
 
 // newClient builds a client from the connection flags.
-func (c *connectionFlags) newClient(stderr io.Writer) (*typesafe.Client, error) {
-	opts, err := c.options(stderr)
+func (c *connectionFlags) newClient(stderr io.Writer, extraOpts []typesafe.Option) (*typesafe.Client, error) {
+	opts, err := c.options(stderr, extraOpts)
 	if err != nil {
 		return nil, err
 	}
@@ -322,7 +327,7 @@ func (s *stringList) Set(value string) error {
 	return nil
 }
 
-func runModels(ctx context.Context, args []string, stdout, stderr io.Writer, inherited connectionFlags) int {
+func runModels(ctx context.Context, args []string, stdout, stderr io.Writer, inherited connectionFlags, extraOpts []typesafe.Option) int {
 	var own connectionFlags
 	fs := flag.NewFlagSet("models", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -344,7 +349,7 @@ func runModels(ctx context.Context, args []string, stdout, stderr io.Writer, inh
 		return failf(stderr, exitUsage, "models takes no arguments")
 	}
 
-	client, err := connection.newClient(stderr)
+	client, err := connection.newClient(stderr, extraOpts)
 	if err != nil {
 		return fail(stderr, exitUsage, err)
 	}
@@ -376,7 +381,7 @@ func runModels(ctx context.Context, args []string, stdout, stderr io.Writer, inh
 	return writeJSON(stdout, stderr, response)
 }
 
-func runAsk(ctx context.Context, args []string, stdout, stderr io.Writer, stdin io.Reader, inherited connectionFlags) int {
+func runAsk(ctx context.Context, args []string, stdout, stderr io.Writer, stdin io.Reader, inherited connectionFlags, extraOpts []typesafe.Option) int {
 	var own connectionFlags
 	var nouls, choices, scores, boxes stringList
 
@@ -442,11 +447,14 @@ func runAsk(ctx context.Context, args []string, stdout, stderr io.Writer, stdin 
 		if *stateFile == "" {
 			return failf(stderr, exitUsage, "--state-file requires a file path or -")
 		}
-		stateValue, stdinUsed, err = loadFileOrStdin(*stateFile, stdin, stdinUsed)
+		stateValue, stdinUsed, err = loadFileOrStdin(ctx, *stateFile, stdin, stdinUsed)
 	default:
-		stateValue, stdinUsed, err = loadInput(*state, stdin, stdinUsed)
+		stateValue, stdinUsed, err = loadInput(ctx, *state, stdin, stdinUsed)
 	}
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return fail(stderr, exitConnection, err)
+		}
 		return fail(stderr, exitUsage, err)
 	}
 	if stateValue == nil {
@@ -464,12 +472,15 @@ func runAsk(ctx context.Context, args []string, stdout, stderr io.Writer, stdin 
 	case *questions != "":
 		questionSource = questionInputSpec{value: *questions, fileOnly: false}
 	}
-	named, err := buildQuestions(questionSource, stdin, stdinUsed, nouls, choices, scores, boxes)
+	named, err := buildQuestions(ctx, questionSource, stdin, stdinUsed, nouls, choices, scores, boxes)
 	if err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return fail(stderr, exitConnection, err)
+		}
 		return fail(stderr, exitUsage, err)
 	}
 
-	client, err := connection.newClient(stderr)
+	client, err := connection.newClient(stderr, extraOpts)
 	if err != nil {
 		return fail(stderr, exitUsage, err)
 	}
@@ -504,7 +515,7 @@ type questionInputSpec struct {
 
 // buildQuestions assembles the question map from the JSON input and the
 // convenience flags. Names must be unique across both.
-func buildQuestions(source questionInputSpec, stdin io.Reader, stdinUsed bool, nouls, choices, scores, boxes stringList) (map[string]any, error) {
+func buildQuestions(ctx context.Context, source questionInputSpec, stdin io.Reader, stdinUsed bool, nouls, choices, scores, boxes stringList) (map[string]any, error) {
 	named := map[string]any{}
 
 	if source.value != "" {
@@ -512,10 +523,10 @@ func buildQuestions(source questionInputSpec, stdin io.Reader, stdinUsed bool, n
 		var err error
 		allowStatHint := false
 		if source.fileOnly {
-			raw, _, err = loadFileOrStdin(source.value, stdin, stdinUsed)
+			raw, _, err = loadFileOrStdin(ctx, source.value, stdin, stdinUsed)
 		} else {
 			allowStatHint = source.value != "-" && !strings.HasPrefix(source.value, "@")
-			raw, _, err = loadInput(source.value, stdin, stdinUsed)
+			raw, _, err = loadInput(ctx, source.value, stdin, stdinUsed)
 		}
 		if err != nil {
 			return nil, err
@@ -662,7 +673,7 @@ func parseLevels(value string) ([]any, error) {
 
 // loadInput reads a flag value that may be inline, a file reference, or stdin.
 // It returns nil for an empty value.
-func loadInput(value string, stdin io.Reader, stdinUsed bool) (any, bool, error) {
+func loadInput(ctx context.Context, value string, stdin io.Reader, stdinUsed bool) (any, bool, error) {
 	switch value {
 	case "":
 		return nil, stdinUsed, nil
@@ -670,14 +681,14 @@ func loadInput(value string, stdin io.Reader, stdinUsed bool) (any, bool, error)
 		if stdinUsed {
 			return nil, stdinUsed, errors.New("stdin (-) cannot be read by multiple flags")
 		}
-		content, err := readBounded(stdin, typesafe.MaxRequestBodyLimit)
+		content, err := readBounded(ctx, stdin, typesafe.MaxRequestBodyLimit)
 		if err != nil {
 			return nil, true, fmt.Errorf("reading stdin: %w", err)
 		}
 		return content, true, nil
 	}
 	if path, ok := strings.CutPrefix(value, "@"); ok {
-		content, err := readRegularFileBounded(path, typesafe.MaxRequestBodyLimit)
+		content, err := readRegularFileBounded(ctx, path, typesafe.MaxRequestBodyLimit)
 		if err != nil {
 			return nil, stdinUsed, err
 		}
@@ -686,25 +697,80 @@ func loadInput(value string, stdin io.Reader, stdinUsed bool) (any, bool, error)
 	return value, stdinUsed, nil
 }
 
-func loadFileOrStdin(path string, stdin io.Reader, stdinUsed bool) (any, bool, error) {
+func loadFileOrStdin(ctx context.Context, path string, stdin io.Reader, stdinUsed bool) (any, bool, error) {
 	if path == "-" {
 		if stdinUsed {
 			return nil, stdinUsed, errors.New("stdin (-) cannot be read by multiple flags")
 		}
-		content, err := readBounded(stdin, typesafe.MaxRequestBodyLimit)
+		content, err := readBounded(ctx, stdin, typesafe.MaxRequestBodyLimit)
 		if err != nil {
 			return nil, true, fmt.Errorf("reading stdin: %w", err)
 		}
 		return content, true, nil
 	}
-	content, err := readRegularFileBounded(path, typesafe.MaxRequestBodyLimit)
+	content, err := readRegularFileBounded(ctx, path, typesafe.MaxRequestBodyLimit)
 	if err != nil {
 		return nil, stdinUsed, err
 	}
 	return content, stdinUsed, nil
 }
 
-func readBounded(r io.Reader, limit int64) (string, error) {
+func readBounded(ctx context.Context, r io.Reader, limit int64) (string, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+	}
+	if ctx != nil && ctx.Done() != nil {
+		if d, ok := r.(interface{ SetReadDeadline(time.Time) error }); ok {
+			if err := d.SetReadDeadline(time.Time{}); err == nil {
+				stopWake := context.AfterFunc(ctx, func() { _ = d.SetReadDeadline(time.Now()) })
+				defer func() {
+					if !stopWake() {
+						_ = d.SetReadDeadline(time.Time{})
+					}
+				}()
+				data, readErr := io.ReadAll(io.LimitReader(r, limit+1))
+				if readErr != nil {
+					if ctx.Err() != nil {
+						return "", ctx.Err()
+					}
+					return "", readErr
+				}
+				if int64(len(data)) > limit {
+					return "", fmt.Errorf("input exceeds the %d-byte limit", limit)
+				}
+				return string(data), nil
+			}
+		}
+		// Fallback for readers without deadline support (such as TTYs or custom io.Readers).
+		type readOutcome struct {
+			data []byte
+			err  error
+		}
+		ch := make(chan readOutcome, 1)
+		go func() {
+			data, err := io.ReadAll(io.LimitReader(r, limit+1))
+			ch <- readOutcome{data: data, err: err}
+		}()
+		select {
+		case <-ctx.Done():
+			return "", ctx.Err()
+		case out := <-ch:
+			if out.err != nil {
+				return "", out.err
+			}
+			if int64(len(out.data)) > limit {
+				return "", fmt.Errorf("input exceeds the %d-byte limit", limit)
+			}
+			return string(out.data), nil
+		}
+	}
+
+	return readBoundedSync(r, limit)
+}
+
+func readBoundedSync(r io.Reader, limit int64) (string, error) {
 	data, err := io.ReadAll(io.LimitReader(r, limit+1))
 	if err != nil {
 		return "", err
@@ -715,7 +781,12 @@ func readBounded(r io.Reader, limit int64) (string, error) {
 	return string(data), nil
 }
 
-func readRegularFileBounded(path string, limit int64) (string, error) {
+func readRegularFileBounded(ctx context.Context, path string, limit int64) (string, error) {
+	if ctx != nil {
+		if err := ctx.Err(); err != nil {
+			return "", err
+		}
+	}
 	preInfo, err := os.Stat(path)
 	if err != nil {
 		return "", err
@@ -742,7 +813,7 @@ func readRegularFileBounded(path string, limit int64) (string, error) {
 	if info.Size() > limit {
 		return "", fmt.Errorf("file %q (%d bytes) exceeds the %d-byte limit", path, info.Size(), limit)
 	}
-	return readBounded(file, limit)
+	return readBoundedSync(file, limit)
 }
 
 // parseState decodes a state value: JSON when it parses, a plain string otherwise.

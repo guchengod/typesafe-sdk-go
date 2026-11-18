@@ -13,7 +13,7 @@ Official Go client SDK for [TypeSafe AI](https://typesafe.ai) — calibrated, de
 Ask dozens of questions in a single parallel call and receive calibrated probabilities, categorical labels, scores, and bounding box coordinates rather than unstructured LLM text that requires fragile parsing.
 
 - **Standard Library Only**: Built with `net/http`, `encoding/json`, and `log/slog`. Zero runtime external dependencies.
-- **Concurrency-Safe**: Client instances are stateless across calls and share HTTP connection pools. All methods accept `context.Context`.
+- **Concurrency-Safe**: Client instances hold no per-request mutable state and share HTTP connection pools across goroutines. Pass a non-nil `context.Context` to all calls and call `Client.Close()` once all in-flight work finishes.
 - **Automatic Gzip Compression**: Transparently compresses request bodies $\ge 1\text{ KiB}$ with standard gzip.
 - **Multimodal & Object Localization**: First-class support for `Image` assets and `Box` bounding box question primitives.
 - **Resilient Retries**: Exponential backoff with jitter, honoring upstream `Retry-After` response headers.

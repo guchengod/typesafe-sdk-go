@@ -52,6 +52,9 @@ func DefaultRetryStatuses() map[int]bool {
 //	policy.Timeout = new(30 * time.Second) // bound the whole call
 //
 // A non-nil policy passed to [WithRetryPolicy] or [WithCallRetry] is validated when it is used.
+// Once a RetryPolicy is shared across goroutines, do not mutate its fields in place; custom
+// [RetryPolicy.Predicate], [RetryPolicy.Sleep], and [RetryPolicy.RandFloat] callbacks must be safe
+// for concurrent invocation.
 type RetryPolicy struct {
 	// MaxRetries is the number of retries after the initial attempt. Zero disables retries.
 	MaxRetries int
@@ -210,22 +213,40 @@ func (p *RetryPolicy) delay(attempt int, lastErr error) time.Duration {
 
 // wait sleeps for delay unless the context ends first.
 func (p *RetryPolicy) wait(ctx context.Context, delay time.Duration) error {
+	return p.waitWithTimer(ctx, delay, nil)
+}
+
+func (p *RetryPolicy) waitWithTimer(ctx context.Context, delay time.Duration, shared **time.Timer) error {
+	if ctx == nil {
+		return &SDKError{Message: "context must not be nil."}
+	}
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if delay <= 0 {
-		if err := ctx.Err(); err != nil {
-			return err
-		}
 		return nil
 	}
 	if p.Sleep != nil {
 		return p.Sleep(ctx, delay)
 	}
-	timer := time.NewTimer(delay)
-	defer timer.Stop()
+	var timer *time.Timer
+	if shared != nil {
+		if *shared == nil {
+			*shared = time.NewTimer(delay)
+		} else {
+			(*shared).Reset(delay)
+		}
+		timer = *shared
+	} else {
+		timer = time.NewTimer(delay)
+		defer timer.Stop()
+	}
 	select {
 	case <-ctx.Done():
+		timer.Stop()
 		return ctx.Err()
 	case <-timer.C:
-		return nil
+		return ctx.Err()
 	}
 }
 
@@ -235,6 +256,9 @@ func (p *RetryPolicy) wait(ctx context.Context, delay time.Duration) error {
 // when the retry budget would be exceeded, when the failure is not retryable, or when the
 // caller's context ends. A cancelled or expired context is never retried.
 func (p *RetryPolicy) Execute(ctx context.Context, fn func(attempt int) error) error {
+	if ctx == nil {
+		return &SDKError{Message: "context must not be nil."}
+	}
 	policy := p
 	if policy == nil {
 		policy = DefaultRetryPolicy()
@@ -242,6 +266,13 @@ func (p *RetryPolicy) Execute(ctx context.Context, fn func(attempt int) error) e
 	if err := policy.Validate(); err != nil {
 		return err
 	}
+
+	var timer *time.Timer
+	defer func() {
+		if timer != nil {
+			timer.Stop()
+		}
+	}()
 
 	start := time.Now()
 	for attempt := 0; ; attempt++ {
@@ -266,7 +297,7 @@ func (p *RetryPolicy) Execute(ctx context.Context, fn func(attempt int) error) e
 		if policy.Timeout != nil && time.Since(start)+delay >= *policy.Timeout {
 			return err
 		}
-		if waitErr := policy.wait(ctx, delay); waitErr != nil {
+		if waitErr := policy.waitWithTimer(ctx, delay, &timer); waitErr != nil {
 			return waitErr
 		}
 	}

@@ -704,6 +704,7 @@ func TestClientRequestCompression(t *testing.T) {
 	if err != nil {
 		t.Fatalf("gzip.NewReader failed: %v", err)
 	}
+	defer func() { _ = gr.Close() }()
 	decompressed, err := io.ReadAll(gr)
 	if err != nil {
 		t.Fatalf("decompression failed: %v", err)

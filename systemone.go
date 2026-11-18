@@ -50,14 +50,14 @@ import (
 // for unsuccessful responses, [APIConnectionError] and [APITimeoutError] for transport failures,
 // and [APIResponseValidationError] for a success response that could not be decoded.
 func (c *Client) SystemOne(ctx context.Context, state any, questions any, opts ...RequestOption) (*SystemOneResponse, error) {
-	if c == nil || c.config == nil {
-		return nil, &SDKError{Message: "Client is not initialized; construct one with NewClient."}
+	if err := c.checkOpen(ctx); err != nil {
+		return nil, err
 	}
 	raw, asked, err := c.systemOne(ctx, state, questions, opts)
 	if err != nil {
 		return nil, err
 	}
-	return parseSystemOneResponse(raw, asked, c.config.Logger)
+	return parseSystemOneResponseWithContext(ctx, raw, asked, c.config.Logger)
 }
 
 // SystemOneAs answers questions and decodes the response into T, a caller-defined struct.
@@ -81,14 +81,14 @@ func (c *Client) SystemOne(ctx context.Context, state any, questions any, opts .
 // Answer types this SDK version does not model are dropped from the decoded document, exactly as in
 // the [Client.SystemOne] path.
 func (c *Client) SystemOneAs[T any](ctx context.Context, state any, questions any, opts ...RequestOption) (*T, error) {
-	if c == nil || c.config == nil {
-		return nil, &SDKError{Message: "Client is not initialized; construct one with NewClient."}
+	if err := c.checkOpen(ctx); err != nil {
+		return nil, err
 	}
 	raw, asked, err := c.systemOne(ctx, state, questions, opts)
 	if err != nil {
 		return nil, err
 	}
-	parsed, err := parseSystemOneResponse(raw, asked, c.config.Logger)
+	parsed, err := parseSystemOneResponseWithContext(ctx, raw, asked, c.config.Logger)
 	if err != nil {
 		return nil, err
 	}
@@ -111,7 +111,7 @@ func SystemOneAs[T any](ctx context.Context, client *Client, state any, question
 // the question ids the request carries, in a stable order, which the response parser needs to check
 // that every question was answered.
 func (c *Client) systemOne(ctx context.Context, state any, questions any, opts []RequestOption) (*response, []string, error) {
-	normalized, err := NormalizeQuestions(questions)
+	normalized, err := normalizeQuestionsReadOnly(questions)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -130,7 +130,7 @@ func (c *Client) systemOne(ctx context.Context, state any, questions any, opts [
 	// images are collected so the assets match the body that is actually sent.
 	maps.Copy(body, options.extraBody)
 	if _, overridden := options.extraBody["questions"]; overridden {
-		validatedExtraQuestions, err := NormalizeQuestions(body["questions"])
+		validatedExtraQuestions, err := normalizeQuestionsReadOnly(body["questions"])
 		if err != nil {
 			return nil, nil, err
 		}
@@ -293,5 +293,8 @@ func decodeFieldPath(err error) string {
 
 // String implements fmt.Stringer for convenient debugging of a response.
 func (r *SystemOneResponse) String() string {
+	if r == nil {
+		return "SystemOneResponse(nil)"
+	}
 	return fmt.Sprintf("SystemOneResponse{model: %s, answers: %d}", r.Model, len(r.Answers))
 }

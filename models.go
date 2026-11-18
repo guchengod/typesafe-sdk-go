@@ -18,8 +18,11 @@ type ModelsService struct {
 //		fmt.Println(model.Name, model.ReleaseDate)
 //	}
 func (s *ModelsService) List(ctx context.Context, opts ...RequestOption) (*ListModelsResponse, error) {
-	if s == nil || s.client == nil || s.client.config == nil {
+	if s == nil || s.client == nil {
 		return nil, &SDKError{Message: "Client is not initialized; construct one with NewClient."}
+	}
+	if err := s.client.checkOpen(ctx); err != nil {
+		return nil, err
 	}
 	options := resolveRequestOptions(opts)
 	req, err := s.client.newRequest(http.MethodGet, ModelsPath, nil, options)

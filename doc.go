@@ -148,8 +148,10 @@
 //     image filenames can be confined with [NewImageFromRoot], credentials in URLs are stripped
 //     from logs and error endpoints, response bodies are bounded, and the SDK's transport refuses
 //     TLS below 1.2. Headers the SDK owns cannot be displaced by caller-supplied ones.
-//   - Concurrency: a [Client] holds no per-request state and is safe for concurrent use; every
-//     call takes a context.Context for cancellation and deadlines.
+//   - Concurrency: a [Client] holds no per-request state and is safe for concurrent use across
+//     goroutines; call [Client.Close] once all in-flight calls complete (note that Close flushes
+//     idle connections and closes non-default io.Closer transports). Every call requires a non-nil
+//     context.Context for cancellation and deadlines.
 //   - Modern Go: for range over integers, min and max, slices and maps helpers, encoding/json/v2,
 //     stdlib uuid, and generic methods via [Client.SystemOneAs]. Standard library only, and Go 1.27.3 or newer.
 package typesafe

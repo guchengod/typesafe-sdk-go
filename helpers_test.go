@@ -34,6 +34,7 @@ type mockTransport struct {
 func (m *mockTransport) RoundTrip(req *http.Request) (*http.Response, error) {
 	var body []byte
 	if req.Body != nil {
+		defer func() { _ = req.Body.Close() }()
 		read, err := io.ReadAll(req.Body)
 		if err != nil {
 			return nil, err
